@@ -1,0 +1,18 @@
+BETTING BAYIN V12.5 - Render Environment
+
+Required:
+GROQ_API_KEY=YOUR_GROQ_API_KEY
+TELEGRAM_BOT_TOKEN=YOUR_TELEGRAM_BOT_TOKEN
+ADMIN_USER_ID=1051898916
+ADMIN_USERNAME =@ThakhinAdam55
+
+For subscription persistence across Render restarts/deploys:
+DATABASE_URL=postgresql://...
+
+If DATABASE_URL is NOT set, database.py falls back to local SQLite.
+Local SQLite works, but Render's ephemeral filesystem can lose it on redeploy/restart.
+
+Deploy:
+git add bot.py database.py requirements.txt
+git commit -m "V12.5 fast tip persistent subscription"
+git push origin main

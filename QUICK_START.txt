@@ -1,0 +1,73 @@
+BETTING BAYIN V12 - QUICK START
+================================
+
+This package keeps your .env and local databases OUT of the ZIP.
+Do not delete your existing .env file.
+
+MAIN UPGRADE
+------------
+V12 now connects the full chain:
+
+Screenshot Vision
+-> Market Analysis
+-> Cached/Fresh Research
+-> Verification
+-> Evidence Recovery
+-> Own + Opponent Historical Elo
+-> Strength V4
+-> Probability V2
+-> Calibration
+-> Market Value / Conflict Gate
+-> Final Decision
+-> Telegram Report
+
+FIRST TEST
+----------
+1. Keep your current .env in the BettingBayin folder.
+2. Activate your existing virtual environment.
+3. Run:
+
+   python full_system_test.py
+
+Expected ending:
+
+   ✅ ALL CORE TESTS PASSED
+
+LOCAL SCREENSHOT FULL RUN
+-------------------------
+Put the screenshot at test.jpeg and run:
+
+   python main.py
+
+TELEGRAM BOT
+------------
+Run:
+
+   python bot.py
+
+Then send a PRE-MATCH football screenshot to the bot.
+Live screenshots are intentionally blocked in V12 because the current models are pre-match models.
+
+IMPORTANT FILES ADDED/UPDATED
+-----------------------------
+pipeline_engine.py     Unified full pipeline
+main.py                Local screenshot -> final result
+bot.py                 Telegram screenshot -> final result
+full_system_test.py    Fast offline compatibility test
+
+ENVIRONMENT VARIABLES
+---------------------
+GROQ_API_KEY=...
+TELEGRAM_BOT_TOKEN=...
+ADMIN_USER_ID=...
+
+Optional:
+VISION_MODEL=qwen/qwen3.6-27b
+BETTING_BAYIN_IMAGE=test.jpeg
+
+NOTES
+-----
+- Existing research cache/database logic is preserved.
+- Recovery only saves verified evidence when it improves accepted data.
+- Market/data conflicts remain blocked instead of forcing a bet.
+- Bookmaker odds are not used inside the independent strength/probability model.

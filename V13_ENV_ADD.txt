@@ -1,0 +1,11 @@
+Add these to Render -> Environment:
+DEEPSEEK_API_KEY=<your DeepSeek API key>
+DEEPSEEK_MODEL=deepseek-v4-flash
+
+Keep existing:
+GROQ_API_KEY
+TELEGRAM_BOT_TOKEN
+ADMIN_USER_ID
+ADMIN_USERNAME
+
+Important: DeepSeek audits evidence; it does NOT override statistical probabilities.

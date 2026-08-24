@@ -1,0 +1,17 @@
+BETTING BAYIN - 24/7 DEPLOYMENT
+
+Mac ပိတ်ထားရင် local python bot.py လည်း ရပ်သွားပါတယ်။ 24/7 အတွက် cloud host လိုပါတယ်။
+
+RAILWAY QUICK DEPLOY
+1. Project folder ကို GitHub repository တင်ပါ။ .env ကို GitHub မတင်ပါနဲ့။
+2. Railway > New Project > Deploy from GitHub Repo.
+3. Variables မှာ အောက်က values ကို Railway dashboard မှာ ထည့်ပါ:
+   GROQ_API_KEY
+   TELEGRAM_BOT_TOKEN
+   ADMIN_USER_ID
+4. Deploy လုပ်ပါ။ railway.json / Dockerfile က python bot.py ကို worker အဖြစ် run ပါမယ်။
+5. Railway logs မှာ "Betting Bayin ONLINE" ပေါ်ရင် Mac ပိတ်ထားလည်း bot ဆက် run ပါမယ်။
+
+SECURITY
+- .env ကို GitHub commit မလုပ်ပါနဲ့။
+- API keys / Telegram token ကို public repo ထဲ မထည့်ပါနဲ့။
