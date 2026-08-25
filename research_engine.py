@@ -28,7 +28,7 @@ client = Groq(
 
 RESEARCH_MODEL = "groq/compound-mini"
 
-MAX_RETRIES = 2
+MAX_RETRIES = 1
 DEFAULT_RETRY_SECONDS = 5
 
 

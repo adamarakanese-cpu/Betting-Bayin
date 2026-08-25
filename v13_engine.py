@@ -1,7 +1,7 @@
 import math
 from deepseek_verifier import verify_model_context
 
-V13_VERSION = "V13.1"
+V13_VERSION = "V13.2"
 
 
 def _f(v):
@@ -152,11 +152,25 @@ def build_v13_decision(extracted, research, probability, calibration):
             "reliability": reliability,
         }
 
-    best = ranked[0]
-    # Grade, not a fake certainty claim.
-    if best["evidence_confidence"] >= 0.75 and best["model_probability"] >= 0.62 and best["expected_value"] >= 0.02:
+    # V13.2: never call a negative-EV selection a value tip. Prefer positive-EV
+    # candidates; if none exist, still return the safest model fallback because
+    # the product is configured to always provide a tip.
+    positive = [c for c in ranked if c["expected_value"] >= 0.0 and c["edge"] >= 0.0]
+    if positive:
+        best = positive[0]
+        tip_mode = "VALUE"
+    else:
+        best = max(ranked, key=lambda c: (c["model_probability"] - c["risk_penalty"], c["ranking_score"]))
+        tip_mode = "SAFEST_FALLBACK"
+
+    if audit.get("contradiction"):
+        best = {**best, "evidence_confidence": best["evidence_confidence"] * 0.75}
+
+    if (tip_mode == "VALUE" and best["evidence_confidence"] >= 0.75
+            and best["model_probability"] >= 0.62 and best["expected_value"] >= 0.02):
         grade = "A"
-    elif best["evidence_confidence"] >= 0.58 and best["model_probability"] >= 0.55:
+    elif (tip_mode == "VALUE" and best["evidence_confidence"] >= 0.58
+          and best["model_probability"] >= 0.55 and best["expected_value"] >= 0.0):
         grade = "B"
     else:
         grade = "C"
@@ -164,7 +178,7 @@ def build_v13_decision(extracted, research, probability, calibration):
     return {
         "version": V13_VERSION,
         "status": "TIP_READY",
-        "tip": {**best, "grade": grade},
+        "tip": {**best, "grade": grade, "tip_mode": tip_mode},
         "ranked_candidates": ranked[:8],
         "deepseek_audit": audit,
         "reliability": reliability,
@@ -194,11 +208,14 @@ def format_v13_tip(result):
     edge = tip["edge"] * 100
     ev = tip["expected_value"] * 100
     audit = v13.get("deepseek_audit", {}) or {}
-    ai_status = "DeepSeek ✓" if audit.get("status") == "OK" else "Statistical Engine"
+    ai_status = "DeepSeek evidence audit ✓" if audit.get("status") == "OK" else "Statistical Engine"
+    mode = tip.get("tip_mode", "VALUE")
+    title = "🎯 BEST VALUE MODEL TIP" if mode == "VALUE" else "🛡 SAFEST MODEL FALLBACK"
+    value_note = "" if mode == "VALUE" else "\n⚠️ Positive EV မတွေ့ပါ — safest visible model pick ဖြစ်ပါတယ်။\n"
 
     return (
         "👑 BETTING BAYIN V13\n\n"
-        "🎯 BEST MODEL TIP\n\n"
+        f"{title}\n\n"
         f"⚽ ပွဲစဉ် (Match): {home} vs {away}\n"
         f"🏆 League: {league}\n"
         "🎫 လောင်းမည့်အမျိုးအစား (Bet Type): Pre Bet\n"
@@ -209,7 +226,8 @@ def format_v13_tip(result):
         f"💹 Expected Value: {ev:+.1f}%\n"
         f"🛡 Evidence Confidence: {conf:.1f}%\n"
         f"🏅 Grade: {tip['grade']}\n"
-        f"🤖 Verification: {ai_status}\n\n"
+        f"🤖 Verification: {ai_status}\n"
+        f"{value_note}\n"
         "ℹ️ Probability = model estimate; Confidence = data/evidence quality. "
         "99% accuracy is not guaranteed."
     )
