@@ -1,0 +1,11 @@
+BETTING BAYIN V13.4
+
+- Hard precision gate removed for lower-data/friendly matches.
+- NO BET is last-resort only when no screenshot-visible market is supported.
+- Evidence-aware market anchoring blends weak model estimates toward bookmaker no-vig consensus.
+- Friendly/youth/reserve uncertainty is penalized rather than blocked.
+- Positive EV preferred; safety-first supported market fallback when robust positive EV is absent.
+- Longshot EV traps reduced with odds/risk penalties.
+- DeepSeek remains evidence audit only; contradictions reduce confidence.
+- A/B+/B/C grading and VALUE / SAFETY-FIRST / LOW-CONFIDENCE modes.
+- Output reports Robust Probability and sparse-evidence warnings.
