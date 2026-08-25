@@ -1,7 +1,7 @@
 import math
 from deepseek_verifier import verify_model_context
 
-V13_VERSION = "V14.0 FINAL"
+V13_VERSION = "V15.0 FINAL PRE-BET"
 
 
 def _f(v):
@@ -290,6 +290,32 @@ def _hidden_model_candidates(extracted, probability, calibration, reliability, d
     if btts.get("no") is not None:
         specs.append(("Both Teams To Score", "No", btts.get("no"), 0.00))
 
+    # Extra model-derived goal markets from the Poisson expected-goals layer.
+    # These are model picks only when the bookmaker quote is not visible.
+    expected = (probability or {}).get("expected_goals", {}) or {}
+    hx = _f(expected.get("home_xg"))
+    ax = _f(expected.get("away_xg"))
+    if hx is not None and ax is not None:
+        lam = max(0.01, hx + ax)
+        p0 = math.exp(-lam)
+        p_le4 = sum(math.exp(-lam) * (lam ** k) / math.factorial(k) for k in range(5))
+        specs += [
+            ("Total", "Over (0.5)", 1.0 - p0, -0.02),
+            ("Total", "Under (0.5)", p0, 0.12),
+            ("Total", "Over (4.5)", 1.0 - p_le4, 0.08),
+            ("Total", "Under (4.5)", p_le4, -0.01),
+            ("At Least One Team To Score", "Yes", 1.0 - p0, -0.02),
+        ]
+
+    # Correct-score candidates come from the model's score distribution. They
+    # carry a deliberately high risk penalty and will almost never outrank a
+    # safer supported market; this prevents long-shot score traps.
+    for score_item in ((probability or {}).get("most_likely_scores", []) or [])[:3]:
+        score = str(score_item.get("score") or "").strip()
+        sp = _f(score_item.get("probability"))
+        if score and sp is not None:
+            specs.append(("Correct Score", score, sp, 0.28))
+
     # Team-to-score / clean-sheet markets are available from the Poisson model,
     # though the calibration engine does not expose calibrated versions yet.
     scoring = (probability or {}).get("team_scoring", {}) or {}
@@ -298,6 +324,8 @@ def _hidden_model_candidates(extracted, probability, calibration, reliability, d
     for market, sel, key in [
         ("Home Team Total", "Over (0.5)", "home_to_score"),
         ("Away Team Total", "Over (0.5)", "away_to_score"),
+        ("Home Team Total", "Under (0.5)", "away_clean_sheet"),
+        ("Away Team Total", "Under (0.5)", "home_clean_sheet"),
         ("Home Clean Sheet", "Yes", "home_clean_sheet"),
         ("Away Clean Sheet", "Yes", "away_clean_sheet"),
     ]:
@@ -318,7 +346,7 @@ def _hidden_model_candidates(extracted, probability, calibration, reliability, d
         p = _uncertainty_shrink(p_raw, evidence, extracted)
         if _market_key(market_name, selection) in visible_pairs:
             continue
-        margin = 0.05 if market_name == "1X2" else 0.04
+        margin = 0.12 if market_name == "Correct Score" else (0.05 if market_name == "1X2" else 0.04)
         est_low, est_high, est_odds = _estimated_odds_range(p, evidence, extracted, margin)
         risk = base_risk + comp_penalty + 0.025  # hidden-market uncertainty penalty
         if est_odds >= 4.0: risk += 0.14

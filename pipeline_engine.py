@@ -23,7 +23,7 @@ from v13_engine import build_v13_decision
 # UNIFIED PIPELINE ENGINE
 # =========================================================
 
-PIPELINE_VERSION = "V14.0 FINAL"
+PIPELINE_VERSION = "V15.0 FINAL PRE-BET"
 
 
 def _required_match_fields(extracted_data):
@@ -187,7 +187,7 @@ def run_full_pipeline(
             "pipeline_version": PIPELINE_VERSION,
             "status": "LIVE_NOT_SUPPORTED",
             "decision": "PASS",
-            "reason": "V12 production pipeline is pre-match only. Live screenshots are blocked.",
+            "reason": "V15.0 FINAL PRE-BET supports pre-match screenshots only. Live screenshots are blocked.",
             "extracted_data": extracted_data,
         }
 

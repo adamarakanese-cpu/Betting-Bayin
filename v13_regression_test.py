@@ -59,4 +59,4 @@ if __name__ == '__main__':
     test_visible_double_chance_is_authoritative()
     test_hidden_market_can_be_estimated_but_not_duplicate_visible()
     test_customer_output_never_uses_x2()
-    print('PASS: V14.0 FINAL market/odds regression suite')
+    print('PASS: V15.0 FINAL market/odds regression suite')

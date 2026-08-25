@@ -28,6 +28,8 @@ from database import (
     check_license,
     get_user,
     log_usage,
+    save_tip,
+    get_recent_tips,
 )
 
 from pipeline_engine import (
@@ -35,10 +37,11 @@ from pipeline_engine import (
     format_final_report,
 )
 from v13_engine import format_v13_tip
+from parlay_engine import build_best_parlay, format_parlay
 
 
 # =========================================================
-# BETTING BAYIN V14.0 FINAL
+# BETTING BAYIN V15.0 FINAL PRE-BET
 # TELEGRAM BOT + FULL AI PIPELINE + RENDER HEALTH SERVER
 # =========================================================
 
@@ -135,7 +138,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             payload = {
                 "ok": True,
                 "service": "Betting Bayin",
-                "version": "V14.0 FINAL",
+                "version": "V15.0 FINAL PRE-BET",
                 "telegram_polling": True,
             }
             body = json.dumps(payload).encode("utf-8")
@@ -156,7 +159,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             body = json.dumps({
                 "ok": True,
                 "service": "Betting Bayin",
-                "version": "V14.0 FINAL",
+                "version": "V15.0 FINAL PRE-BET",
                 "telegram_polling": True,
             }).encode("utf-8")
             self.send_response(200)
@@ -470,7 +473,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if is_admin(user.id):
         await update.message.reply_text(
-            "👑 BETTING BAYIN V14.0 FINAL\n\n"
+            "👑 BETTING BAYIN V15.0 FINAL PRE-BET\n\n"
             "🛡 ADMIN MODE\n\n"
             f"Admin ID: {user.id}\n\n"
             "COMMANDS\n\n"
@@ -489,7 +492,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if active:
         expiry_text = expires_at.strftime("%d-%m-%Y %H:%M UTC")
         await update.message.reply_text(
-            "👑 BETTING BAYIN V14.0 FINAL\n\n"
+            "👑 BETTING BAYIN V15.0 FINAL PRE-BET\n\n"
             f"မင်္ဂလာပါ {user.first_name}!\n\n"
             "🟢 SUBSCRIPTION ACTIVE\n\n"
             f"⏳ Expire: {expiry_text}\n\n"
@@ -726,6 +729,8 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         log_usage(user.id, "full_pipeline_analysis")
+        # Persist exactly the final customer tip so it can be reused later in a parlay.
+        await asyncio.to_thread(save_tip, user.id, result)
 
         reply = format_v13_tip(result)
 
@@ -761,11 +766,53 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
 
 
+async def _build_parlay_reply(user_id, text):
+    # Accept natural language such as: "ခုနက ၅ ပွဲကို မောင်းတွဲ" / "last 5 parlay".
+    raw = str(text or "")
+    digit_map = str.maketrans("၀၁၂၃၄၅၆၇၈၉", "0123456789")
+    normalized = raw.translate(digit_map).lower()
+
+    import re
+    match = re.search(r"\b(\d{1,2})\b", normalized)
+    pool_size = int(match.group(1)) if match else 5
+    pool_size = max(2, min(pool_size, 10))
+
+    rows = await asyncio.to_thread(get_recent_tips, user_id, pool_size)
+    parlay = build_best_parlay(rows, requested_pool_size=pool_size)
+    return format_parlay(parlay)
+
+
+async def parlay_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_admin(user.id):
+        active, status, expires_at = check_license(user.id)
+        if not active:
+            await update.message.reply_text("🔒 Subscription မရှိပါ သို့မဟုတ် သက်တမ်းကုန်နေပါပြီ။")
+            return
+    text = " ".join(context.args) if context.args else "5"
+    await update.message.reply_text(await _build_parlay_reply(user.id, text))
+
+
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    text = str(update.message.text or "").strip()
+    low = text.lower()
+    parlay_words = ("မောင်း", "တွဲ", "parlay", "accumulator", "acca", "combo")
+
+    if any(word in low for word in parlay_words):
+        if not is_admin(user.id):
+            active, status, expires_at = check_license(user.id)
+            if not active:
+                await update.message.reply_text("🔒 Subscription မရှိပါ သို့မဟုတ် သက်တမ်းကုန်နေပါပြီ။")
+                return
+        await update.message.reply_text(await _build_parlay_reply(user.id, text))
+        return
+
     await update.message.reply_text(
-        "👑 BETTING BAYIN V14.0 FINAL\n\n"
+        "👑 BETTING BAYIN V15.0 FINAL PRE-BET\n\n"
         "📸 1XBET Pre-Bet Screenshot ပို့ပေးပါ.\n\n"
-        "🔐 Subscription စစ်ရန်:\n/subscription"
+        "မောင်းတွဲရန် — ဥပမာ ‘ခုနက 5 ပွဲကို မောင်းတွဲ’\n"
+        "🔐 Subscription စစ်ရန်: /subscription"
     )
 
 
@@ -774,7 +821,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 def main():
-    print("👑 BETTING BAYIN V14.0 FINAL")
+    print("👑 BETTING BAYIN V15.0 FINAL PRE-BET")
     print("🟢 Starting...")
 
     if ADMIN_USER_ID:
@@ -817,6 +864,7 @@ def main():
     application.add_handler(CommandHandler("extend", extend_command))
     application.add_handler(CommandHandler("block", block_command))
     application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("parlay", parlay_command))
     application.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     application.add_handler(
         MessageHandler(

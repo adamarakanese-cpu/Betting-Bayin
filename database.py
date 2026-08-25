@@ -280,3 +280,158 @@ def log_usage(telegram_id, action):
 
 
 init_database()
+# =========================================================
+# PERSISTENT TIP HISTORY (Single -> Parlay workflow)
+# =========================================================
+
+def _ensure_tip_history_table():
+    if USING_POSTGRES:
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS tip_history (
+                        id BIGSERIAL PRIMARY KEY,
+                        telegram_id BIGINT NOT NULL,
+                        home_team TEXT NOT NULL,
+                        away_team TEXT NOT NULL,
+                        competition TEXT,
+                        market_name TEXT NOT NULL,
+                        selection TEXT NOT NULL,
+                        odds DOUBLE PRECISION,
+                        odds_estimated BOOLEAN NOT NULL DEFAULT FALSE,
+                        estimated_odds_low DOUBLE PRECISION,
+                        estimated_odds_high DOUBLE PRECISION,
+                        model_probability DOUBLE PRECISION NOT NULL,
+                        evidence_confidence DOUBLE PRECISION,
+                        ranking_score DOUBLE PRECISION,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                """)
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_tip_history_user_time
+                    ON tip_history (telegram_id, created_at DESC)
+                """)
+        return
+
+    with _sqlite_conn() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS tip_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER NOT NULL,
+                home_team TEXT NOT NULL,
+                away_team TEXT NOT NULL,
+                competition TEXT,
+                market_name TEXT NOT NULL,
+                selection TEXT NOT NULL,
+                odds REAL,
+                odds_estimated INTEGER NOT NULL DEFAULT 0,
+                estimated_odds_low REAL,
+                estimated_odds_high REAL,
+                model_probability REAL NOT NULL,
+                evidence_confidence REAL,
+                ranking_score REAL,
+                created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_tip_history_user_time
+            ON tip_history (telegram_id, created_at DESC)
+        """)
+        conn.commit()
+
+
+def save_tip(telegram_id, result):
+    """Persist the final tip shown to a user for later accumulator requests."""
+    v13 = (result or {}).get("v13", {}) or {}
+    tip = v13.get("tip") or {}
+    if not tip:
+        return False
+
+    match = (result or {}).get("match", {}) or {}
+    extracted = (result or {}).get("extracted_data", {}) or {}
+    ematch = extracted.get("match", {}) or {}
+
+    home = str(match.get("home_team") or ematch.get("home_team") or "").strip()
+    away = str(match.get("away_team") or ematch.get("away_team") or "").strip()
+    if not home or not away:
+        return False
+
+    row = (
+        int(telegram_id),
+        home,
+        away,
+        str(match.get("competition") or extracted.get("competition") or "").strip(),
+        str(tip.get("market_name") or "").strip(),
+        str(tip.get("selection") or "").strip(),
+        float(tip.get("odds") or 0.0),
+        bool(tip.get("odds_estimated")),
+        float(tip.get("estimated_odds_low")) if tip.get("estimated_odds_low") is not None else None,
+        float(tip.get("estimated_odds_high")) if tip.get("estimated_odds_high") is not None else None,
+        float(tip.get("model_probability") or 0.0),
+        float(tip.get("evidence_confidence") or 0.0),
+        float(tip.get("ranking_score") or 0.0),
+    )
+
+    if USING_POSTGRES:
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO tip_history (
+                        telegram_id, home_team, away_team, competition,
+                        market_name, selection, odds, odds_estimated,
+                        estimated_odds_low, estimated_odds_high,
+                        model_probability, evidence_confidence, ranking_score
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, row)
+        return True
+
+    with _sqlite_conn() as conn:
+        conn.execute("""
+            INSERT INTO tip_history (
+                telegram_id, home_team, away_team, competition,
+                market_name, selection, odds, odds_estimated,
+                estimated_odds_low, estimated_odds_high,
+                model_probability, evidence_confidence, ranking_score, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, row + (utc_now().isoformat(),))
+        conn.commit()
+    return True
+
+
+def get_recent_tips(telegram_id, limit=5):
+    limit = max(2, min(int(limit or 5), 10))
+    if USING_POSTGRES:
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT * FROM tip_history
+                    WHERE telegram_id = %s
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT %s
+                """, (int(telegram_id), limit))
+                rows = cur.fetchall() or []
+                return [dict(r) for r in reversed(rows)]
+
+    with _sqlite_conn() as conn:
+        cur = conn.execute("""
+            SELECT * FROM tip_history
+            WHERE telegram_id = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+        """, (int(telegram_id), limit))
+        rows = [dict(r) for r in cur.fetchall()]
+        return list(reversed(rows))
+
+
+def clear_tip_history(telegram_id):
+    if USING_POSTGRES:
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM tip_history WHERE telegram_id = %s", (int(telegram_id),))
+        return
+    with _sqlite_conn() as conn:
+        conn.execute("DELETE FROM tip_history WHERE telegram_id = ?", (int(telegram_id),))
+        conn.commit()
+
+
+_ensure_tip_history_table()
