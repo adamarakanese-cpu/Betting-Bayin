@@ -1,7 +1,7 @@
 import math
 from deepseek_verifier import verify_model_context
 
-V13_VERSION = "V13.7"
+V13_VERSION = "V14.0 FINAL"
 
 
 def _f(v):
@@ -14,6 +14,29 @@ def _f(v):
 
 def _norm(s):
     return str(s or "").strip().lower().replace("−", "-")
+
+
+def _canonical_market(market_name):
+    """Canonical market families used only for matching/deduplication."""
+    m = _norm(market_name)
+    compact = m.replace(" ", "").replace("-", "")
+    if compact in {"1x2", "matchresult", "fulltimeresult"}:
+        return "1x2"
+    if "doublechance" in compact and "bothteam" not in compact:
+        return "double chance"
+    if compact in {"btts", "bothteamstoscore", "bothteamscore"} or "bothteamstoscore" in compact:
+        return "btts"
+    if "total" in m and "team" not in m:
+        return "total"
+    if "home" in m and "team" in m and "total" in m:
+        return "home team total"
+    if "away" in m and "team" in m and "total" in m:
+        return "away team total"
+    if "home" in m and "clean" in m and "sheet" in m:
+        return "home clean sheet"
+    if "away" in m and "clean" in m and "sheet" in m:
+        return "away clean sheet"
+    return m
 
 
 def _canonical_selection(market_name, selection):
@@ -36,7 +59,7 @@ def _canonical_selection(market_name, selection):
 
 def _market_key(market_name, selection):
     # Canonical key is for matching only. Customer display follows 1X / 12 / 2X.
-    return (_norm(market_name), _canonical_selection(market_name, selection))
+    return (_canonical_market(market_name), _canonical_selection(market_name, selection))
 
 
 def _display_selection(market_name, selection):
@@ -119,9 +142,22 @@ def _market_risk(market_name, selection, odds):
 
 def _competition_penalty(extracted):
     c = _norm(extracted.get("competition"))
-    if "friendly" in c: return 0.08
-    if any(x in c for x in ("reserve", "u19", "u20", "u21", "youth")): return 0.06
-    return 0.0
+    penalty = 0.0
+    if "friendly" in c:
+        penalty += 0.08
+    if any(x in c for x in ("reserve", "u17", "u18", "u19", "u20", "u21", "u23", "youth")):
+        penalty += 0.06
+    if any(x in c for x in ("regional", "amateur", "development")):
+        penalty += 0.04
+    return min(0.12, penalty)
+
+
+def _uncertainty_shrink(probability, evidence, extracted, floor_weight=0.35):
+    """Shrink model-only probabilities toward 50% when evidence/competition is weak."""
+    p = _clamp(probability, 0.01, 0.99)
+    comp = _competition_penalty(extracted)
+    weight = _clamp(floor_weight + evidence * 0.55 - comp * 1.25, 0.28, 0.90)
+    return _clamp(0.50 + (p - 0.50) * weight, 0.01, 0.99)
 
 
 def _evidence_confidence(reliability, audit):
@@ -200,15 +236,21 @@ def rank_visible_markets(extracted, calibration, reliability, deepseek_audit=Non
 
 
 def _estimated_bookmaker_odds(probability, margin=0.045):
-    """Conservative estimated offered odds for model-only markets.
-
-    These are NOT live bookmaker prices. We shade model fair odds by a modest
-    bookmaker margin so the customer sees a realistic estimate rather than a
-    fabricated exact quote.
-    """
+    """Central estimate derived from probability; never presented as a live quote."""
     p = _clamp(probability, 0.01, 0.99)
     offered = 1.0 / min(0.995, p * (1.0 + margin))
     return max(1.01, round(offered, 3))
+
+
+def _estimated_odds_range(probability, evidence, extracted, margin=0.045):
+    """Return a probability-consistent bookmaker range for hidden markets."""
+    center = _estimated_bookmaker_odds(probability, margin)
+    # Sparse competitions get a wider band. This is explicitly an estimate.
+    comp = _competition_penalty(extracted)
+    width = 0.06 + (1.0 - _clamp(evidence)) * 0.10 + comp * 0.55
+    low = max(1.01, center * (1.0 - width))
+    high = max(low + 0.02, center * (1.0 + width))
+    return round(low, 2), round(high, 2), center
 
 
 def _hidden_model_candidates(extracted, probability, calibration, reliability, deepseek_audit=None):
@@ -273,11 +315,12 @@ def _hidden_model_candidates(extracted, probability, calibration, reliability, d
             visible_pairs.add(_market_key(market.get("market_name"), item.get("selection")))
 
     for market_name, selection, p_raw, base_risk in specs:
-        p = _clamp(p_raw, 0.01, 0.99)
+        p = _uncertainty_shrink(p_raw, evidence, extracted)
         if _market_key(market_name, selection) in visible_pairs:
             continue
-        est_odds = _estimated_bookmaker_odds(p, 0.05 if market_name == "1X2" else 0.04)
-        risk = base_risk + comp_penalty
+        margin = 0.05 if market_name == "1X2" else 0.04
+        est_low, est_high, est_odds = _estimated_odds_range(p, evidence, extracted, margin)
+        risk = base_risk + comp_penalty + 0.025  # hidden-market uncertainty penalty
         if est_odds >= 4.0: risk += 0.14
         elif est_odds >= 3.0: risk += 0.08
         elif est_odds >= 2.25: risk += 0.03
@@ -296,6 +339,8 @@ def _hidden_model_candidates(extracted, probability, calibration, reliability, d
             "market_name": market_name,
             "selection": selection,
             "odds": est_odds,
+            "estimated_odds_low": est_low,
+            "estimated_odds_high": est_high,
             "odds_estimated": True,
             "raw_model_probability": p,
             "model_probability": p,
@@ -383,9 +428,10 @@ def build_v13_decision(extracted, research, probability, calibration):
     # Reward real positive-EV screenshot markets without letting EV overpower
     # win probability. Estimated-odds markets receive no EV bonus.
     def final_score(c):
-        bonus = 0.0
+        # A real screenshot quote is stronger evidence than a model-only market.
+        bonus = 0.018 if not c.get("odds_estimated") else 0.0
         if not c.get("odds_estimated") and c.get("expected_value", 0) > 0:
-            bonus = min(0.035, c["expected_value"] * 0.10)
+            bonus += min(0.035, c["expected_value"] * 0.10)
         return c["ranking_score"] + bonus
 
     best = max(pool, key=final_score)
@@ -440,8 +486,17 @@ def format_v13_tip(result):
     market_text = f"{market} — {selection}" if selection else market
     odds = float(tip.get("odds") or 0.0)
     probability = float(tip.get("model_probability") or 0.0) * 100.0
-    odds_label = "Estimated Odds" if tip.get("odds_estimated") else "Odds"
-    odds_text = f"{odds:.2f}" if tip.get("odds_estimated") else f"{odds:.3f}"
+    if tip.get("odds_estimated"):
+        odds_label = "Estimated Odds Range"
+        low = _f(tip.get("estimated_odds_low"))
+        high = _f(tip.get("estimated_odds_high"))
+        if low is not None and high is not None:
+            odds_text = f"{low:.2f}–{high:.2f}"
+        else:
+            odds_text = f"~{odds:.2f}"
+    else:
+        odds_label = "Odds"
+        odds_text = f"{odds:.3f}"
 
     return (
         f"👑 BETTING BAYIN {V13_VERSION}\n\n"

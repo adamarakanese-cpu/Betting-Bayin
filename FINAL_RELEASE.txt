@@ -1,0 +1,31 @@
+BETTING BAYIN — PRE-BET FINAL RELEASE V14.0
+
+Release scope
+- PRE-BET football only. Live screenshots are rejected before prediction.
+- Customer output stays concise: match, competition, pre-bet, one tip, odds/estimated range, win chance.
+
+Locked market/odds rules
+1. Screenshot-visible market + selection => screenshot odds are the absolute source of truth.
+2. Hidden/model-only market => never shown as a real bookmaker quote.
+3. Hidden/model-only odds => shown as an Estimated Odds Range derived from model probability.
+4. Double Chance customer labels => 1X / 12 / 2X only.
+5. Alias matching prevents X2/2X, X1/1X, BTTS/Both Teams To Score, and common 1X2 naming from creating duplicate synthetic candidates.
+6. Visible market candidates receive a modest source-quality preference because their prices are real screenshot quotes.
+
+Prediction reliability controls
+- Sparse evidence is blended toward market consensus for visible markets.
+- Model-only probabilities are shrunk toward 50% when evidence is weak.
+- Friendly/youth/reserve/regional/amateur/development competitions receive additional uncertainty penalties.
+- Long-shot odds cannot dominate selection merely because nominal EV is large.
+- Estimated-odds candidates receive no fake EV advantage.
+
+Release checks
+- Python compile: PASS
+- V14 final-release regression tests: PASS
+- Offline core self-test: PASS
+- Secret-pattern scan: PASS at packaging time
+
+Important
+- Estimated odds are not live bookmaker prices.
+- Football predictions are probabilistic; no win rate can be guaranteed.
+- For persistent subscriptions on Render, configure DATABASE_URL (Postgres). Local SQLite on ephemeral hosting is not persistent.

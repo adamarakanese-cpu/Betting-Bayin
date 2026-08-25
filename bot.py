@@ -38,7 +38,7 @@ from v13_engine import format_v13_tip
 
 
 # =========================================================
-# BETTING BAYIN V13.7
+# BETTING BAYIN V14.0 FINAL
 # TELEGRAM BOT + FULL AI PIPELINE + RENDER HEALTH SERVER
 # =========================================================
 
@@ -135,7 +135,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             payload = {
                 "ok": True,
                 "service": "Betting Bayin",
-                "version": "V13",
+                "version": "V14.0 FINAL",
                 "telegram_polling": True,
             }
             body = json.dumps(payload).encode("utf-8")
@@ -156,7 +156,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             body = json.dumps({
                 "ok": True,
                 "service": "Betting Bayin",
-                "version": "V13",
+                "version": "V14.0 FINAL",
                 "telegram_polling": True,
             }).encode("utf-8")
             self.send_response(200)
@@ -470,7 +470,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if is_admin(user.id):
         await update.message.reply_text(
-            "👑 BETTING BAYIN V13.7\n\n"
+            "👑 BETTING BAYIN V14.0 FINAL\n\n"
             "🛡 ADMIN MODE\n\n"
             f"Admin ID: {user.id}\n\n"
             "COMMANDS\n\n"
@@ -489,7 +489,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if active:
         expiry_text = expires_at.strftime("%d-%m-%Y %H:%M UTC")
         await update.message.reply_text(
-            "👑 BETTING BAYIN V13.7\n\n"
+            "👑 BETTING BAYIN V14.0 FINAL\n\n"
             f"မင်္ဂလာပါ {user.first_name}!\n\n"
             "🟢 SUBSCRIPTION ACTIVE\n\n"
             f"⏳ Expire: {expiry_text}\n\n"
@@ -708,6 +708,16 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             temp_path,
         )
 
+        # Final Pre-Bet release: never analyze a live screenshot as pre-match.
+        live = extracted.get("live", {}) or {}
+        match_type = str(extracted.get("match_type") or "").strip().lower()
+        if bool(live.get("is_live")) or "live" in match_type:
+            await update.message.reply_text(
+                "⚠️ BETTING BAYIN PRE-BET ONLY\n\n"
+                "Live match screenshot မဟုတ်ဘဲ ပွဲမစခင် Pre-Bet screenshot ပို့ပေးပါ။"
+            )
+            return
+
         result = await asyncio.to_thread(
             run_full_pipeline,
             extracted,
@@ -753,7 +763,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👑 BETTING BAYIN V13.7\n\n"
+        "👑 BETTING BAYIN V14.0 FINAL\n\n"
         "📸 1XBET Pre-Bet Screenshot ပို့ပေးပါ.\n\n"
         "🔐 Subscription စစ်ရန်:\n/subscription"
     )
@@ -764,7 +774,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 def main():
-    print("👑 BETTING BAYIN V13.7")
+    print("👑 BETTING BAYIN V14.0 FINAL")
     print("🟢 Starting...")
 
     if ADMIN_USER_ID:
