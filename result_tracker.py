@@ -9,7 +9,7 @@ from database import (
     mark_prediction_checked,
     settle_prediction_score,
 )
-from result_engine import market_family
+from result_engine import market_family, market_period
 
 _tracker_started = False
 _tracker_lock = threading.Lock()
@@ -169,6 +169,12 @@ def check_pending_results(limit=4, force=False):
     summary = {"checked": 0, "settled": 0, "unresolved": 0, "pending": len(rows)}
     for row in rows:
         summary["checked"] += 1
+        # We only have verified final/full-time scores in the automatic tracker.
+        # Do not settle 1st/2nd-half markets with a final score.
+        if market_period(row.get("market_name")) != "regular_time":
+            mark_prediction_checked(row["id"], note="period_result_requires_manual_settlement")
+            summary["unresolved"] += 1
+            continue
         lookup = lookup_final_score(row)
         if not lookup or lookup.get("status") != "completed":
             mark_prediction_checked(row["id"], note=(lookup or {}).get("status") if lookup else "not_found")

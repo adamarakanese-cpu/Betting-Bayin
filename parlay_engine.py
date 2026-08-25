@@ -17,6 +17,28 @@ def _match_key(row):
     )
 
 
+
+def _display_market(market, selection):
+    market = str(market or "Market").strip()
+    selection = str(selection or "").strip()
+    low = market.lower()
+    period = "Regular Time"
+    base = market
+    if low.startswith("1st half "):
+        period, base = "1st Half", market[len("1st Half "):].strip()
+    elif low.startswith("first half "):
+        period, base = "1st Half", market[len("First Half "):].strip()
+    elif low.startswith("2nd half "):
+        period, base = "2nd Half", market[len("2nd Half "):].strip()
+    elif low.startswith("second half "):
+        period, base = "2nd Half", market[len("Second Half "):].strip()
+    elif low.startswith("regular time "):
+        period, base = "Regular Time", market[len("Regular Time "):].strip()
+
+    if base.lower() == "total":
+        return f"{period} — {selection}"
+    return f"{period} — {base} — {selection}" if selection else f"{period} — {base}"
+
 def _leg_quality(row):
     p = max(0.01, min(0.99, _f(row.get("model_probability"), 0.0)))
     evidence = max(0.0, min(1.0, _f(row.get("evidence_confidence"), 0.0)))
@@ -120,27 +142,18 @@ def format_parlay(parlay):
             "Screenshot တွေတစ်ပွဲချင်းပို့ပြီးမှ ‘ခုနက 5 ပွဲကို မောင်းတွဲ’ လို့ပို့ပါ။"
         )
 
-    lines = ["👑 BETTING BAYIN — BEST ACCUMULATOR", ""]
+    lines = ["👑 BETTING BAYIN PRE-BET — BEST ACCUMULATOR", ""]
     for idx, leg in enumerate(parlay["legs"], 1):
         market = str(leg.get("market_name") or "Market")
         selection = str(leg.get("selection") or "")
         lines.append(f"{idx}. ⚽ {leg.get('home_team')} vs {leg.get('away_team')}")
-        lines.append(f"   🎯 {market} — {selection}")
-        if bool(leg.get("odds_estimated")):
-            lo = _f(leg.get("estimated_odds_low"), _f(leg.get("odds"), 0.0))
-            hi = _f(leg.get("estimated_odds_high"), _f(leg.get("odds"), 0.0))
-            lines.append(f"   💰 Estimated Odds: {lo:.2f}–{hi:.2f}")
-        else:
+        lines.append(f"   🎯 {_display_market(market, selection)}")
+        if not bool(leg.get("odds_estimated")):
             lines.append(f"   💰 Odds: {_f(leg.get('odds')):.3f}")
         lines.append(f"   📊 Win Chance: {_f(leg.get('model_probability')) * 100:.0f}%")
         lines.append("")
 
-    if parlay["contains_estimated_odds"]:
-        lines.append(
-            f"💰 Combined Estimated Odds: "
-            f"{parlay['combined_odds_low']:.2f}–{parlay['combined_odds_high']:.2f}"
-        )
-    else:
+    if not parlay["contains_estimated_odds"]:
         lines.append(f"💰 Combined Odds: {parlay['combined_odds']:.2f}")
     lines.append(f"📊 Combined Win Chance: {parlay['combined_probability'] * 100:.1f}%")
     lines.append(f"🧩 Selected: {len(parlay['legs'])} legs from recent {parlay['pool_size']} tips")

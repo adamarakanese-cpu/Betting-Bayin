@@ -1,0 +1,23 @@
+BETTING BAYIN V16.1 — MARKET ALBUM + REAL ODDS PRIORITY FIX
+
+FIXED
+- Telegram photo albums are buffered and all screenshots are read before analysis.
+- Multiple pages for the same match are merged into one visible market library.
+- If the same market/selection appears more than once, the latest visible bookmaker odds win.
+- Different matches accidentally sent in one album are kept separate.
+- Real screenshot odds are preferred when multiple market pages are supplied.
+- Hidden synthetic Total Over 0.5 / At Least One Team To Score / Team Total 0.5 recommendations are disabled without a visible price.
+- Total selection aliases such as Over (1.5) / Over 1.5 are normalized so actual quotes override estimates.
+- Very short-price visible markets remain readable but are filtered from best-tip selection when practical alternatives exist.
+- V16 result tracking, parlay, subscription, menu and PostgreSQL persistence remain unchanged.
+
+WHY
+V16.0 analyzed each Telegram album image as a separate update, so a response could be produced from only one page and ignore Total/Handicap odds shown on the other pages. This also let a model-only hidden Over 0.5 repeatedly dominate with an estimated price.
+
+TESTS
+- Python compile: PASS
+- Existing final release tests: PASS
+- Parlay tests: PASS
+- Market/odds regression: PASS
+- Result tracking/learning: PASS
+- V16.1 album merge + visible odds priority + Over 0.5 anti-loop regression: PASS

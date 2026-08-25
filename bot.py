@@ -46,10 +46,11 @@ from pipeline_engine import (
 from v13_engine import format_v13_tip
 from parlay_engine import build_best_parlay, format_parlay
 from result_tracker import check_pending_results, start_result_tracker
+from screenshot_merge import merge_extractions
 
 
 # =========================================================
-# BETTING BAYIN V16.0 FINAL PRE-BET
+# BETTING BAYIN V16.2 PRE-BET
 # TELEGRAM BOT + FULL AI PIPELINE + RENDER HEALTH SERVER
 # =========================================================
 
@@ -96,11 +97,13 @@ STRICT RULES:
 7. Preserve decimal odds accurately.
 8. Identify PRE-MATCH or LIVE.
 9. Extract every visible betting market.
-10. Never guess hidden markets.
-11. Return valid JSON only.
-12. Do not output markdown.
-13. Do not output explanations.
-14. Do not output <think> tags.
+10. For every market, identify the visible time scope: regular_time, 1st_half, 2nd_half, or unknown. Tabs/headers such as Regular time, 1st half and 2nd half determine this field.
+11. Never mix Regular Time prices with 1st Half or 2nd Half prices.
+12. Never guess hidden markets.
+13. Return valid JSON only.
+14. Do not output markdown.
+15. Do not output explanations.
+16. Do not output <think> tags.
 
 Return exactly:
 
@@ -123,6 +126,7 @@ Return exactly:
   "markets": [
     {
       "market_name": "",
+      "period": "regular_time|1st_half|2nd_half|unknown",
       "selections": [
         {
           "selection": "",
@@ -146,7 +150,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             payload = {
                 "ok": True,
                 "service": "Betting Bayin",
-                "version": "V16.0 FINAL PRE-BET",
+                "version": "V16.2 PRE-BET",
                 "telegram_polling": True,
             }
             body = json.dumps(payload).encode("utf-8")
@@ -167,7 +171,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             body = json.dumps({
                 "ok": True,
                 "service": "Betting Bayin",
-                "version": "V16.0 FINAL PRE-BET",
+                "version": "V16.2 PRE-BET",
                 "telegram_polling": True,
             }).encode("utf-8")
             self.send_response(200)
@@ -608,7 +612,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if is_admin(user.id):
         await update.message.reply_text(
-            "👑 BETTING BAYIN V16.0 FINAL PRE-BET\n\n"
+            "👑 BETTING BAYIN PRE-BET\n\n"
             "🛡 ADMIN MODE\n\n"
             f"Admin ID: {user.id}\n\n"
             "COMMANDS\n"
@@ -898,6 +902,135 @@ async def settle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # PHOTO HANDLER
 # =========================================================
 
+MEDIA_GROUP_WAIT_SECONDS = 2.5
+MAX_SCREENSHOTS_PER_MATCH_BATCH = 8
+
+
+def _match_group_key(extracted, fallback_index):
+    match = extracted.get("match") or {}
+    home = " ".join(str(match.get("home_team") or "").strip().lower().split())
+    away = " ".join(str(match.get("away_team") or "").strip().lower().split())
+    if home and away:
+        return (home, away)
+    # Never merge unreadable/unknown matches merely because names are missing.
+    return ("__unknown__", str(fallback_index))
+
+
+async def _process_extracted_match(update, context, user, extracted):
+    # Final Pre-Bet release: never analyze a live screenshot as pre-match.
+    live = extracted.get("live", {}) or {}
+    match_type = str(extracted.get("match_type") or "").strip().lower()
+    if bool(live.get("is_live")) or "live" in match_type:
+        await update.message.reply_text(
+            "⚠️ BETTING BAYIN PRE-BET ONLY\n\n"
+            "Live match screenshot မဟုတ်ဘဲ ပွဲမစခင် Pre-Bet screenshot ပို့ပေးပါ။"
+        )
+        return
+
+    result = await asyncio.to_thread(
+        run_full_pipeline,
+        extracted,
+        False,
+        False,
+    )
+
+    log_usage(user.id, "full_pipeline_analysis")
+    await asyncio.to_thread(save_tip, user.id, result)
+
+    reply = format_v13_tip(result)
+    chunk_size = 3800
+    for index in range(0, len(reply), chunk_size):
+        await update.message.reply_text(reply[index:index + chunk_size])
+
+    print("\n========== BETTING BAYIN RESULT ==========")
+    print(
+        f"Match: {result.get('match', {}).get('home_team')} "
+        f"vs {result.get('match', {}).get('away_team')}"
+    )
+    print(f"Decision: {result.get('decision')}")
+    print(f"Reason: {result.get('reason')}")
+    print(f"Screenshots merged: {extracted.get('screenshots_merged', 1)}")
+    print("==========================================\n")
+
+
+async def _process_photo_file_ids(update, context, file_ids):
+    """Download, read and merge all screenshots before choosing one tip.
+
+    Telegram albums arrive as separate updates with the same media_group_id.
+    V16.2 waits briefly, reads every page, merges all visible markets/odds for
+    the same match, then runs the prediction once. If an album contains several
+    different matches, each match is analyzed separately rather than mixed.
+    """
+    user = update.effective_user
+    temp_paths = []
+
+    try:
+        # Stable de-dup and a defensive cap.
+        unique_ids = []
+        seen = set()
+        for file_id in file_ids:
+            if file_id and file_id not in seen:
+                seen.add(file_id)
+                unique_ids.append(file_id)
+        unique_ids = unique_ids[:MAX_SCREENSHOTS_PER_MATCH_BATCH]
+
+        for file_id in unique_ids:
+            telegram_file = await context.bot.get_file(file_id)
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as temp_file:
+                temp_path = temp_file.name
+            temp_paths.append(temp_path)
+            await telegram_file.download_to_drive(temp_path)
+
+        # Accuracy first: extract every screenshot. This ensures Total/Handicap/
+        # other pages sent in the same Telegram album are not silently ignored.
+        extractions = []
+        for temp_path in temp_paths:
+            extractions.append(await asyncio.to_thread(analyze_screenshot, temp_path))
+
+        # Group by match identity. Same-match pages are merged; different matches
+        # in one album remain independent.
+        groups = {}
+        order = []
+        for idx, extracted in enumerate(extractions):
+            key = _match_group_key(extracted, idx)
+            if key not in groups:
+                groups[key] = []
+                order.append(key)
+            groups[key].append(extracted)
+
+        for key in order:
+            merged = merge_extractions(groups[key])
+            await _process_extracted_match(update, context, user, merged)
+
+    except Exception as error:
+        print("FULL PIPELINE ERROR:", repr(error))
+        await update.message.reply_text(
+            "❌ Analysis error ဖြစ်ပါတယ်.\n\n"
+            f"Error: {type(error).__name__}\n"
+            "Screenshot ကို ပြန်ပို့ကြည့်ပါ။"
+        )
+    finally:
+        for temp_path in temp_paths:
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
+
+
+async def _process_media_group_after_delay(application, group_key):
+    await asyncio.sleep(MEDIA_GROUP_WAIT_SECONDS)
+    groups = application.bot_data.setdefault("photo_media_groups", {})
+    group = groups.pop(group_key, None)
+    if not group:
+        return
+    await _process_photo_file_ids(
+        group["update"],
+        group["context"],
+        group["file_ids"],
+    )
+
+
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
 
@@ -920,76 +1053,34 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-    temp_path = None
+    photo = update.message.photo[-1]
+    media_group_id = update.message.media_group_id
 
-    try:
-        photo = update.message.photo[-1]
-        telegram_file = await context.bot.get_file(photo.file_id)
-
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as temp_file:
-            temp_path = temp_file.name
-
-        await telegram_file.download_to_drive(temp_path)
-
-        # Do not send a waiting message. The user receives one final result only.
-        extracted = await asyncio.to_thread(
-            analyze_screenshot,
-            temp_path,
-        )
-
-        # Final Pre-Bet release: never analyze a live screenshot as pre-match.
-        live = extracted.get("live", {}) or {}
-        match_type = str(extracted.get("match_type") or "").strip().lower()
-        if bool(live.get("is_live")) or "live" in match_type:
-            await update.message.reply_text(
-                "⚠️ BETTING BAYIN PRE-BET ONLY\n\n"
-                "Live match screenshot မဟုတ်ဘဲ ပွဲမစခင် Pre-Bet screenshot ပို့ပေးပါ။"
+    if media_group_id:
+        # Telegram sends an album as separate updates. Buffer by media_group_id
+        # and analyze only once after all pages have arrived.
+        groups = context.application.bot_data.setdefault("photo_media_groups", {})
+        group_key = f"{update.effective_chat.id}:{user.id}:{media_group_id}"
+        group = groups.get(group_key)
+        if group is None:
+            group = {
+                "file_ids": [],
+                "update": update,
+                "context": context,
+                "task": None,
+            }
+            groups[group_key] = group
+        group["update"] = update
+        group["context"] = context
+        if photo.file_id not in group["file_ids"]:
+            group["file_ids"].append(photo.file_id)
+        if group.get("task") is None or group["task"].done():
+            group["task"] = asyncio.create_task(
+                _process_media_group_after_delay(context.application, group_key)
             )
-            return
+        return
 
-        result = await asyncio.to_thread(
-            run_full_pipeline,
-            extracted,
-            False,
-            False,
-        )
-
-        log_usage(user.id, "full_pipeline_analysis")
-        # Persist exactly the final customer tip so it can be reused later in a parlay.
-        await asyncio.to_thread(save_tip, user.id, result)
-
-        reply = format_v13_tip(result)
-
-        # Telegram message hard limit is 4096 chars.
-        chunk_size = 3800
-        for index in range(0, len(reply), chunk_size):
-            await update.message.reply_text(
-                reply[index:index + chunk_size]
-            )
-
-        print("\n========== BETTING BAYIN RESULT ==========")
-        print(
-            f"Match: {result.get('match', {}).get('home_team')} "
-            f"vs {result.get('match', {}).get('away_team')}"
-        )
-        print(f"Decision: {result.get('decision')}")
-        print(f"Reason: {result.get('reason')}")
-        print("==========================================\n")
-
-    except Exception as error:
-        print("FULL PIPELINE ERROR:", repr(error))
-        await update.message.reply_text(
-            "❌ Analysis error ဖြစ်ပါတယ်.\n\n"
-            f"Error: {type(error).__name__}\n"
-            "နောက်တစ်ကြိမ် screenshot ကို ပြန်ပို့ကြည့်ပါ."
-        )
-
-    finally:
-        if temp_path and os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except Exception:
-                pass
+    await _process_photo_file_ids(update, context, [photo.file_id])
 
 
 async def _build_parlay_reply(user_id, text):
@@ -1074,7 +1165,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 def main():
-    print("👑 BETTING BAYIN V16.0 FINAL PRE-BET MENU")
+    print("👑 BETTING BAYIN PRE-BET MENU")
     print("🟢 Starting...")
 
     if ADMIN_USER_ID:

@@ -1,0 +1,50 @@
+BETTING BAYIN PRE-BET — V16.2 FINAL POLISH
+
+1) PERIOD-AWARE MARKETS
+- Every visible market now carries a time scope: Regular Time / 1st Half / 2nd Half.
+- Same market line in different periods is never merged or overwritten.
+- Customer output examples:
+  Regular Time — Over (1.5)
+  1st Half — Over (0.5)
+  2nd Half — Double Chance — 1X
+- Visible half markets receive a conservative period Poisson model anchored to the actual screenshot price.
+- Automatic result settlement never uses a full-time score to settle a half market.
+
+2) ODDS DISPLAY POLICY
+- Exact screenshot odds remain visible when the selected tip uses a real quoted price.
+- Model-estimated/synthetic odds are never shown to customers.
+- Hidden-market tips show the selected market and win chance only.
+- Parlay output also hides estimated leg/combined prices.
+
+3) DYNAMIC LEAGUE + TEAM CONTEXT
+- Research now requests verified league scoring profile, team scoring/conceding profile,
+  goal-line rates, BTTS rate, sample size, style tags and source URLs when available.
+- Context Profile Engine combines verified aggregate data with verified recent results.
+- High/low scoring environment can move expected goals, but the adjustment is bounded
+  so small samples cannot dominate the independent strength/Elo model.
+- Missing lower-league data is never invented. The engine falls back to verified recent
+  results and generic football priors with lower confidence.
+- Research cache preserves gathered match context for reuse.
+
+4) CUSTOMER BRANDING
+- Customer-facing title is always: 👑 BETTING BAYIN PRE-BET
+- Internal version remains V16.2 for health/deployment diagnostics only.
+
+5) V16.1/V16.0 FEATURES KEPT
+- Multi-screenshot album merge
+- Screenshot actual-odds priority
+- Hidden-market fallback
+- Single-to-Parlay memory
+- PostgreSQL persistence
+- Result tracking / performance learning
+- Subscription / Telegram menu
+
+TESTS PASSED
+- Python compile
+- V13 market/odds regression
+- Final-release customer output regression
+- Single-to-Parlay regression
+- V16.1 album/real-odds regression
+- V16.2 period/context/odds-display regression
+- V16 result tracking/performance regression
+- Secret-pattern scan

@@ -1,7 +1,7 @@
 import threading
 import time
 
-from result_engine import calibration_key, market_family
+from result_engine import calibration_key, market_family, market_period
 
 _CACHE_TTL = 300
 _cache_lock = threading.Lock()
@@ -46,15 +46,27 @@ def apply_performance_feedback(candidates):
     out = []
     for original in list(candidates or []):
         c = dict(original)
-        key = calibration_key(c.get("market_name"), c.get("selection"))
-        fam = market_family(c.get("market_name"))
+        market_name = str(c.get("market_name") or "")
+        period = str(c.get("period") or "regular_time").lower()
+        if period in {"1st_half", "first_half"} and "half" not in market_name.lower():
+            market_for_feedback = f"1st Half {market_name}"
+        elif period in {"2nd_half", "second_half"} and "half" not in market_name.lower():
+            market_for_feedback = f"2nd Half {market_name}"
+        elif period == "regular_time" and "regular time" not in market_name.lower():
+            market_for_feedback = f"Regular Time {market_name}"
+        else:
+            market_for_feedback = market_name
+        key = calibration_key(market_for_feedback, c.get("selection"))
+        fam = market_family(market_for_feedback)
         # Do not auto-calibrate exact-score longshots from small outcome samples.
         if fam == "correct_score":
             c["performance_adjustment"] = 0.0
             c["performance_sample"] = 0
             out.append(c)
             continue
-        stat = feedback.get("keys", {}).get(key) or feedback.get("families", {}).get(fam)
+        stat = feedback.get("keys", {}).get(key)
+        if not stat and market_period(market_for_feedback) == "regular_time":
+            stat = feedback.get("families", {}).get(fam)
         if not stat:
             c["performance_adjustment"] = 0.0
             c["performance_sample"] = 0

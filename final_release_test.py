@@ -49,7 +49,7 @@ def test_market_alias_deduplication():
     assert all(not r['odds_estimated'] for r in dcs)
 
 
-def test_hidden_market_output_is_range_not_fake_quote():
+def test_hidden_market_output_hides_estimated_quote():
     result = {
         'match': {'home_team': 'A', 'away_team': 'B', 'competition': 'League'},
         'extracted_data': {'live': {'is_live': False}},
@@ -60,8 +60,9 @@ def test_hidden_market_output_is_range_not_fake_quote():
         }},
     }
     text = format_v13_tip(result)
-    assert 'Estimated Odds Range: 1.61–1.91' in text
+    assert 'Estimated Odds' not in text
     assert 'Odds: 1.760' not in text
+    assert 'Regular Time — Under (3.5)' in text
 
 
 def test_double_chance_customer_names_only():
@@ -79,6 +80,6 @@ def test_double_chance_customer_names_only():
 if __name__ == '__main__':
     test_visible_total_price_is_absolute_source_of_truth()
     test_market_alias_deduplication()
-    test_hidden_market_output_is_range_not_fake_quote()
+    test_hidden_market_output_hides_estimated_quote()
     test_double_chance_customer_names_only()
     print('PASS: V15.0 FINAL pre-bet release tests')

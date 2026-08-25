@@ -1,7 +1,7 @@
 import os
 import sqlite3
 from datetime import datetime, timezone, timedelta
-from result_engine import build_prediction_key, market_family, calibration_key, settle_market
+from result_engine import build_prediction_key, market_family, market_period, calibration_key, settle_market
 
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 SQLITE_PATH = os.getenv("SQLITE_DB_PATH", "betting_bayin.db")
@@ -341,6 +341,21 @@ def _ensure_tip_history_table():
         conn.commit()
 
 
+
+def _stored_market_name(tip):
+    market = str((tip or {}).get("market_name") or "").strip()
+    period = str((tip or {}).get("period") or "regular_time").strip().lower()
+    if not market:
+        return market
+    low = market.lower()
+    if any(prefix in low for prefix in ("regular time", "1st half", "first half", "2nd half", "second half")):
+        return market
+    if period in {"1st_half", "first_half"}:
+        return f"1st Half {market}"
+    if period in {"2nd_half", "second_half"}:
+        return f"2nd Half {market}"
+    return f"Regular Time {market}"
+
 def save_tip(telegram_id, result):
     """Persist the final tip shown to a user for later accumulator requests."""
     v13 = (result or {}).get("v13", {}) or {}
@@ -362,7 +377,7 @@ def save_tip(telegram_id, result):
         home,
         away,
         str(match.get("competition") or extracted.get("competition") or "").strip(),
-        str(tip.get("market_name") or "").strip(),
+        _stored_market_name(tip),
         str(tip.get("selection") or "").strip(),
         float(tip.get("odds") or 0.0),
         bool(tip.get("odds_estimated")),
@@ -546,7 +561,7 @@ def _prediction_payload(result):
     # when the same clubs meet again in a later fixture.
     key_date = match_date or utc_now().strftime("%Y-%m-%d")
     start_time = str(extracted.get("start_time") or "").strip()
-    market = str(tip.get("market_name") or "").strip()
+    market = _stored_market_name(tip)
     selection = str(tip.get("selection") or "").strip()
     if not market or not selection:
         return None
@@ -560,7 +575,11 @@ def _prediction_payload(result):
         "start_time_text": start_time,
         "market_name": market,
         "selection": selection,
-        "market_family": market_family(market),
+        "market_family": (
+            market_family(market)
+            if market_period(market) == "regular_time"
+            else f"{market_period(market)}:{market_family(market)}"
+        ),
         "calibration_key": calibration_key(market, selection),
         "odds": float(tip.get("odds") or 0.0),
         "odds_estimated": bool(tip.get("odds_estimated")),

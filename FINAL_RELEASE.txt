@@ -1,33 +1,22 @@
-BETTING BAYIN — FINAL PRE-BET RELEASE V16.0
+BETTING BAYIN PRE-BET — FINAL RELEASE V16.2
 
-Production stack
-- Telegram Pre-Bet screenshot input
-- Vision extraction with visible-odds priority
-- Research + probability + calibration + market ranking
-- Hidden supported-market discovery with estimated odds ranges
-- Single Tip output
-- Persistent Single -> Parlay history
-- Best 2-4 leg accumulator selection from recent tips
-- PostgreSQL persistent subscription and history support via DATABASE_URL
-- Telegram customer menu and admin support flow
-- Verified result tracking
-- Automatic performance measurement and bounded calibration feedback
+Production scope: Football Pre-Bet only.
 
-Final production rules
-1. Screenshot-visible odds always override estimated/synthetic odds for the same market selection.
-2. Double Chance customer labels are 1X / 12 / 2X.
-3. Hidden market prices are shown only as Estimated Odds Range.
-4. Live screenshots are rejected by the Pre-Bet bot.
-5. Low-data competitions receive uncertainty penalties.
-6. Parlay never forces all supplied matches into the accumulator.
-7. Result tracking never guesses an unverified final score.
-8. Performance learning activates only after sample thresholds and is capped at +/-4pp.
-9. Estimated odds are excluded from ROI accounting.
-10. Customer tip delivery continues even if performance tracking is temporarily unavailable.
+Core release features:
+- Multi-screenshot 1XBET market merge
+- Regular Time / 1st Half / 2nd Half market separation
+- Screenshot actual odds as source of truth
+- Hidden supported-market discovery without fake live-odds claims
+- Estimated prices hidden from customer output
+- Dynamic verified league/team context profiling
+- Independent strength + Elo + Poisson probability model
+- Uncertainty/calibration + bounded result-based learning
+- Single Tip + recent-match Parlay workflow
+- PostgreSQL subscription, tip history and result persistence
+- Automatic regular-time result tracking
+- Admin performance/pending/result settlement tools
+- Customer-facing brand title: BETTING BAYIN PRE-BET
 
-Admin result commands
-/performance
-/pending
-/checkresults
-/settle ID 2-1
-/settle ID win|loss|void
+Important model rule:
+No football model can know or guarantee every team/league outcome. V16.2 dynamically
+researches verified context for the exact fixture and never invents unavailable statistics.

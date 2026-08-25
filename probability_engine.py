@@ -970,6 +970,49 @@ def calculate_expected_goals(
     )
 
     # =====================================================
+    # VERIFIED LEAGUE / TEAM CONTEXT
+    # =====================================================
+    # V16.2: recent-score and verified aggregate context can move the generic
+    # football baseline, but only modestly. This prevents a small sample or an
+    # unreliable league profile from overwhelming the independent strength model.
+    context_profile = strength_result.get("context_profile", {}) or {}
+    context_quality = clamp(
+        safe_float(context_profile.get("quality"), 0.0),
+        0.0,
+        1.0,
+    )
+    context_target_total = safe_float(
+        context_profile.get("target_total_goals"),
+        home_xg + away_xg,
+    )
+    context_target_total = max(1.40, min(4.20, context_target_total))
+    context_weight = min(0.28, 0.06 + context_quality * 0.22)
+
+    current_total = max(0.01, home_xg + away_xg)
+    blended_total = (
+        current_total * (1.0 - context_weight)
+        + context_target_total * context_weight
+    )
+    total_scale = max(0.88, min(1.12, blended_total / current_total))
+    home_xg *= total_scale
+    away_xg *= total_scale
+
+    context_home_share = safe_float(
+        context_profile.get("home_goal_share"),
+        home_xg / max(0.01, home_xg + away_xg),
+    )
+    context_home_share = max(0.30, min(0.70, context_home_share))
+    share_weight = min(0.16, context_quality * 0.16)
+    total_after_scale = max(0.01, home_xg + away_xg)
+    current_home_share = home_xg / total_after_scale
+    final_home_share = (
+        current_home_share * (1.0 - share_weight)
+        + context_home_share * share_weight
+    )
+    home_xg = total_after_scale * final_home_share
+    away_xg = total_after_scale * (1.0 - final_home_share)
+
+    # =====================================================
     # TOTAL-GOALS STABILITY
     # =====================================================
     #
@@ -1079,6 +1122,13 @@ def calculate_expected_goals(
 
         "base_away_xg":
             BASE_AWAY_XG,
+
+        "context_profile": {
+            "quality": round(context_quality, 3),
+            "target_total_goals": round(context_target_total, 3),
+            "context_weight": round(context_weight, 3),
+            "home_goal_share": round(context_home_share, 3),
+        },
 
         "home_attack_edge":
             round(

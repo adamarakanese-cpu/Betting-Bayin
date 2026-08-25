@@ -2,7 +2,7 @@ import math
 from deepseek_verifier import verify_model_context
 from performance_engine import apply_performance_feedback
 
-V13_VERSION = "V16.0 FINAL PRE-BET"
+V13_VERSION = "V16.2"
 
 
 def _f(v):
@@ -17,9 +17,54 @@ def _norm(s):
     return str(s or "").strip().lower().replace("−", "-")
 
 
+def _canonical_period(value=None, market_name=None):
+    text = f"{_norm(value)} {_norm(market_name)}"
+    compact = "".join(ch for ch in text if ch.isalnum())
+    if any(token in compact for token in ("1sthalf", "firsthalf", "1half", "half1")):
+        return "1st_half"
+    if any(token in compact for token in ("2ndhalf", "secondhalf", "2half", "half2")):
+        return "2nd_half"
+    raw = _norm(value)
+    if raw in {"1st_half", "first_half"}:
+        return "1st_half"
+    if raw in {"2nd_half", "second_half"}:
+        return "2nd_half"
+    return "regular_time"
+
+
+def _period_label(period):
+    period = _canonical_period(period)
+    if period == "1st_half":
+        return "1st Half"
+    if period == "2nd_half":
+        return "2nd Half"
+    return "Regular Time"
+
+
+def _strip_period_display(market_name):
+    import re
+    text = str(market_name or "").strip().replace("−", "-")
+    for pattern in (
+        r"\bregular\s*time\b", r"\bfull\s*time\b", r"\b90\s*min(?:ute)?s?\b",
+        r"\b1st\s*half\b", r"\bfirst\s*half\b",
+        r"\b2nd\s*half\b", r"\bsecond\s*half\b",
+    ):
+        text = re.sub(pattern, " ", text, flags=re.IGNORECASE)
+    return " ".join(text.split()).strip(" -—:")
+
+
+def _strip_period(market_name):
+    return _norm(_strip_period_display(market_name))
+
+
+def _scoped_market_name(market_name, period):
+    base = _strip_period_display(market_name) or str(market_name or "Market").strip()
+    return f"{_period_label(period)} {base}".strip()
+
+
 def _canonical_market(market_name):
     """Canonical market families used only for matching/deduplication."""
-    m = _norm(market_name)
+    m = _strip_period(market_name)
     compact = m.replace(" ", "").replace("-", "")
     if compact in {"1x2", "matchresult", "fulltimeresult"}:
         return "1x2"
@@ -42,7 +87,7 @@ def _canonical_market(market_name):
 
 def _canonical_selection(market_name, selection):
     """Normalize bookmaker aliases so visible prices always beat estimates."""
-    m = _norm(market_name)
+    m = _strip_period(market_name)
     s = _norm(selection).replace(" ", "")
     if "doublechance" in m.replace(" ", ""):
         if s in {"x2", "2x"}:
@@ -51,16 +96,31 @@ def _canonical_selection(market_name, selection):
             return "1x"
         if s in {"12", "21"}:
             return "12"
-    if m == "1x2":
-        aliases = {"1": "w1", "home": "w1", "homewin": "w1",
-                   "x": "draw", "2": "w2", "away": "w2", "awaywin": "w2"}
+    if _canonical_market(market_name) == "1x2":
+        aliases = {"1": "w1", "w1": "w1", "home": "w1", "homewin": "w1",
+                   "x": "draw", "draw": "draw",
+                   "2": "w2", "w2": "w2", "away": "w2", "awaywin": "w2"}
         return aliases.get(s, s)
+    family = _canonical_market(market_name)
+    if family in {"total", "home team total", "away team total"}:
+        compact = s.replace("(", "").replace(")", "")
+        if compact.startswith("over"):
+            return "over" + compact[4:]
+        if compact.startswith("under"):
+            return "under" + compact[5:]
+    if family == "btts":
+        if s in {"yes", "y"}: return "yes"
+        if s in {"no", "n"}: return "no"
     return s
 
 
-def _market_key(market_name, selection):
-    # Canonical key is for matching only. Customer display follows 1X / 12 / 2X.
-    return (_canonical_market(market_name), _canonical_selection(market_name, selection))
+def _market_key(market_name, selection, period=None):
+    # Period is part of identity: Regular Time Over 1.5 is NOT 1st Half Over 1.5.
+    return (
+        _canonical_period(period, market_name),
+        _canonical_market(market_name),
+        _canonical_selection(market_name, selection),
+    )
 
 
 def _display_selection(market_name, selection):
@@ -124,6 +184,79 @@ def _model_probability(market_name, selection, calibration):
     return None
 
 
+def _poisson_probs(lam, max_goals=9):
+    lam = max(0.01, float(lam))
+    vals = []
+    for k in range(max_goals + 1):
+        vals.append(math.exp(-lam) * (lam ** k) / math.factorial(k))
+    # Tail mass is tiny for normal football lambdas; normalize defensively.
+    total = sum(vals) or 1.0
+    return [v / total for v in vals]
+
+
+def _period_model_probability(market_name, selection, period, calibration, probability):
+    period = _canonical_period(period, market_name)
+    if period == "regular_time":
+        return _model_probability(market_name, selection, calibration)
+
+    expected = (probability or {}).get("expected_goals", {}) or {}
+    home_xg = _f(expected.get("home_xg"))
+    away_xg = _f(expected.get("away_xg"))
+    if home_xg is None or away_xg is None:
+        return None
+
+    # Generic pre-match scoring split. We only use this for screenshot-visible
+    # half markets and still anchor strongly to the real bookmaker price.
+    share = 0.44 if period == "1st_half" else 0.56
+    h_lam = max(0.02, home_xg * share)
+    a_lam = max(0.02, away_xg * share)
+    h_probs = _poisson_probs(h_lam)
+    a_probs = _poisson_probs(a_lam)
+
+    fam = _canonical_market(market_name)
+    sel = _canonical_selection(market_name, selection)
+
+    if fam in {"total", "home team total", "away team total"}:
+        import re
+        match = re.search(r"(over|under)([0-9]+(?:\.[0-9]+)?)", sel)
+        if not match:
+            return None
+        is_over = match.group(1) == "over"
+        line = float(match.group(2))
+        total_p = 0.0
+        for h, hp in enumerate(h_probs):
+            for a, ap in enumerate(a_probs):
+                value = (h + a) if fam == "total" else (h if fam == "home team total" else a)
+                if (value > line and is_over) or (value < line and not is_over):
+                    total_p += hp * ap
+        return _clamp(total_p, 0.005, 0.995)
+
+    if fam == "btts":
+        yes = (1.0 - h_probs[0]) * (1.0 - a_probs[0])
+        return yes if sel == "yes" else (1.0 - yes if sel == "no" else None)
+
+    home_win = draw = away_win = 0.0
+    for h, hp in enumerate(h_probs):
+        for a, ap in enumerate(a_probs):
+            p = hp * ap
+            if h > a:
+                home_win += p
+            elif h < a:
+                away_win += p
+            else:
+                draw += p
+
+    if fam == "1x2":
+        if sel in {"w1", "home"}: return home_win
+        if sel == "draw": return draw
+        if sel in {"w2", "away"}: return away_win
+    if fam == "double chance":
+        if sel == "1x": return home_win + draw
+        if sel == "12": return home_win + away_win
+        if sel == "2x": return away_win + draw
+    return None
+
+
 def _market_risk(market_name, selection, odds):
     m = _norm(market_name)
     if "double chance" in m:
@@ -173,7 +306,7 @@ def _evidence_confidence(reliability, audit):
     return _clamp(evidence)
 
 
-def rank_visible_markets(extracted, calibration, reliability, deepseek_audit=None):
+def rank_visible_markets(extracted, probability, calibration, reliability, deepseek_audit=None):
     """Rank only screenshot-visible markets supported by the probability model.
 
     V13.4 uses market anchoring when evidence is sparse. This prevents a weak-data
@@ -189,13 +322,17 @@ def rank_visible_markets(extracted, calibration, reliability, deepseek_audit=Non
 
     for market in extracted.get("markets", []) or []:
         name = str(market.get("market_name") or "Unknown")
+        period = _canonical_period(market.get("period"), name)
+        scoped_name = _scoped_market_name(name, period)
         selections = market.get("selections", []) or []
         fair_map = _no_vig(selections)
         for item in selections:
             odds = _f(item.get("odds"))
             if not odds or odds <= 1.0:
                 continue
-            raw_model_p = _model_probability(name, item.get("selection"), calibration)
+            raw_model_p = _period_model_probability(
+                name, item.get("selection"), period, calibration, probability
+            )
             market_p = _clamp(fair_map.get(id(item), 1.0 / odds), 0.005, 0.995)
             # V13.5 ALWAYS-TIP fallback: if our statistical model does not natively
             # support this visible market, use the de-vigged market consensus as
@@ -218,7 +355,9 @@ def rank_visible_markets(extracted, calibration, reliability, deepseek_audit=Non
                 - risk * 0.22
             )
             candidates.append({
-                "market_name": name,
+                "market_name": _strip_period_display(name) or name,
+                "base_market_name": _strip_period_display(name) or name,
+                "period": period,
                 "selection": _display_selection(name, item.get("selection")),
                 "odds": odds,
                 "raw_model_probability": raw_model_p,
@@ -300,12 +439,13 @@ def _hidden_model_candidates(extracted, probability, calibration, reliability, d
         lam = max(0.01, hx + ax)
         p0 = math.exp(-lam)
         p_le4 = sum(math.exp(-lam) * (lam ** k) / math.factorial(k) for k in range(5))
+        # Do not synthesize Total 0.5 / "at least one team scores" as a
+        # hidden recommendation. Those markets are often priced around 1.01-1.10
+        # and a model-only price can be wildly different from the bookmaker.
+        # They remain eligible when the real screenshot price is visible.
         specs += [
-            ("Total", "Over (0.5)", 1.0 - p0, -0.02),
-            ("Total", "Under (0.5)", p0, 0.12),
             ("Total", "Over (4.5)", 1.0 - p_le4, 0.08),
             ("Total", "Under (4.5)", p_le4, -0.01),
-            ("At Least One Team To Score", "Yes", 1.0 - p0, -0.02),
         ]
 
     # Correct-score candidates come from the model's score distribution. They
@@ -323,10 +463,8 @@ def _hidden_model_candidates(extracted, probability, calibration, reliability, d
     # Shrink raw model-only binary markets toward 50% according to reliability.
     shrink_w = _clamp(0.25 + evidence * 0.65, 0.25, 0.90)
     for market, sel, key in [
-        ("Home Team Total", "Over (0.5)", "home_to_score"),
-        ("Away Team Total", "Over (0.5)", "away_to_score"),
-        ("Home Team Total", "Under (0.5)", "away_clean_sheet"),
-        ("Away Team Total", "Under (0.5)", "home_clean_sheet"),
+        # Team-total 0.5 markets are intentionally not synthesized without a
+        # visible price for the same reason as match Total 0.5.
         ("Home Clean Sheet", "Yes", "home_clean_sheet"),
         ("Away Clean Sheet", "Yes", "away_clean_sheet"),
     ]:
@@ -341,11 +479,11 @@ def _hidden_model_candidates(extracted, probability, calibration, reliability, d
     for market in extracted.get("markets", []) or []:
         mn = _norm(market.get("market_name"))
         for item in market.get("selections", []) or []:
-            visible_pairs.add(_market_key(market.get("market_name"), item.get("selection")))
+            visible_pairs.add(_market_key(market.get("market_name"), item.get("selection"), market.get("period")))
 
     for market_name, selection, p_raw, base_risk in specs:
         p = _uncertainty_shrink(p_raw, evidence, extracted)
-        if _market_key(market_name, selection) in visible_pairs:
+        if _market_key(market_name, selection, "regular_time") in visible_pairs:
             continue
         margin = 0.12 if market_name == "Correct Score" else (0.05 if market_name == "1X2" else 0.04)
         est_low, est_high, est_odds = _estimated_odds_range(p, evidence, extracted, margin)
@@ -366,6 +504,8 @@ def _hidden_model_candidates(extracted, probability, calibration, reliability, d
 
         out.append({
             "market_name": market_name,
+            "base_market_name": market_name,
+            "period": "regular_time",
             "selection": selection,
             "odds": est_odds,
             "estimated_odds_low": est_low,
@@ -387,12 +527,12 @@ def _hidden_model_candidates(extracted, probability, calibration, reliability, d
 
 
 def rank_all_markets(extracted, probability, calibration, reliability, deepseek_audit=None):
-    visible = rank_visible_markets(extracted, calibration, reliability, deepseek_audit)
+    visible = rank_visible_markets(extracted, probability, calibration, reliability, deepseek_audit)
     visible_by_key = {}
     for c in visible:
         c["odds_estimated"] = False
         c["source"] = "screenshot"
-        visible_by_key[_market_key(c.get("market_name"), c.get("selection"))] = c
+        visible_by_key[_market_key(c.get("market_name"), c.get("selection"), c.get("period"))] = c
 
     hidden = _hidden_model_candidates(
         extracted, probability, calibration, reliability, deepseek_audit
@@ -403,7 +543,7 @@ def rank_all_markets(extracted, probability, calibration, reliability, deepseek_
     # price to represent it. The screenshot quote is the source of truth.
     hidden = [
         c for c in hidden
-        if _market_key(c.get("market_name"), c.get("selection")) not in visible_by_key
+        if _market_key(c.get("market_name"), c.get("selection"), c.get("period")) not in visible_by_key
     ]
     return sorted(visible + hidden, key=lambda x: x["ranking_score"], reverse=True)
 
@@ -442,13 +582,12 @@ def build_v13_decision(extracted, research, probability, calibration):
             "gate_reasons": ["Model ကတွက်နိုင်တဲ့ market မရှိသေးပါ။"],
         }
 
-    # V13.6 universal market selector. Actual screenshot prices and model-only
-    # markets compete in one pool. Probability/safety dominates; positive EV is
-    # a bonus only when we have a real screenshot price.
+    # V16.1 selector: exact screenshot prices are the default source of truth.
+    # Model-only hidden markets remain available, but cannot casually displace a
+    # practical real-price selection. This fixes repeated synthetic Over 0.5 tips
+    # and makes multi-page bookmaker screenshots actually useful.
     pool = [c for c in ranked if c.get("model_supported")] or ranked
 
-    # Prefer a genuinely likely outcome. If at least one candidate is >=55%,
-    # do not select a 30-40% longshot merely because its displayed odds are high.
     safer = [c for c in pool if c["model_probability"] >= 0.55]
     if safer:
         pool = safer
@@ -457,16 +596,33 @@ def build_v13_decision(extracted, research, probability, calibration):
     if practical:
         pool = practical
 
-    # Reward real positive-EV screenshot markets without letting EV overpower
-    # win probability. Estimated-odds markets receive no EV bonus.
     def final_score(c):
-        # A real screenshot quote is stronger evidence than a model-only market.
-        bonus = 0.018 if not c.get("odds_estimated") else 0.0
+        # A real screenshot quote gets a meaningful source-quality bonus.
+        bonus = 0.070 if not c.get("odds_estimated") else 0.0
         if not c.get("odds_estimated") and c.get("expected_value", 0) > 0:
             bonus += min(0.035, c["expected_value"] * 0.10)
         return c["ranking_score"] + bonus
 
-    best = max(pool, key=final_score)
+    visible_pool = [c for c in pool if not c.get("odds_estimated")]
+    hidden_pool = [c for c in pool if c.get("odds_estimated")]
+
+    if visible_pool:
+        best_visible = max(visible_pool, key=final_score)
+        best = best_visible
+        multi_page_prices = int(extracted.get("screenshots_merged", 1) or 1) > 1
+        # If the user deliberately supplied several market pages for the same
+        # match, respect those real bookmaker quotes and do not replace them with
+        # a synthetic estimate. Hidden markets are a fallback for incomplete SS.
+        if hidden_pool and not multi_page_prices:
+            best_hidden = max(hidden_pool, key=final_score)
+            if (
+                final_score(best_hidden) >= final_score(best_visible) + 0.075
+                and best_hidden.get("model_probability", 0) >= best_visible.get("model_probability", 0) + 0.07
+                and best_hidden.get("odds", 0) >= 1.18
+            ):
+                best = best_hidden
+    else:
+        best = max(pool, key=final_score)
     grade = _tip_grade(best)
     mode = _tip_mode(best, audit)
 
@@ -493,7 +649,7 @@ def build_v13_decision(extracted, research, probability, calibration):
 
 
 def format_v13_tip(result):
-    """Customer-facing report: match data + one actionable tip only."""
+    """Customer-facing report: match data + one actionable pre-bet tip only."""
     match = result.get("match", {}) or {}
     extracted = result.get("extracted_data", {}) or {}
     v13 = result.get("v13", {}) or {}
@@ -502,40 +658,45 @@ def format_v13_tip(result):
     home = match.get("home_team") or (extracted.get("match") or {}).get("home_team") or "Home"
     away = match.get("away_team") or (extracted.get("match") or {}).get("away_team") or "Away"
     league = match.get("competition") or extracted.get("competition") or "N/A"
-    live = extracted.get("live", {}) or {}
-    bet_type = "Live Bet" if live.get("is_live") else "Pre Bet"
 
     if not tip:
         return (
-            f"👑 BETTING BAYIN {V13_VERSION}\n\n"
+            "👑 BETTING BAYIN PRE-BET\n\n"
             f"⚽ {home} vs {away}\n"
             f"🏆 {league}\n\n"
             "📸 Market နဲ့ Odds မြင်ရအောင် screenshot ပြန်ပို့ပါ။"
         )
 
     market = str(tip.get("market_name") or "Market").strip()
-    selection = _display_selection(market, tip.get("selection"))
-    market_text = f"{market} — {selection}" if selection else market
-    odds = float(tip.get("odds") or 0.0)
-    probability = float(tip.get("model_probability") or 0.0) * 100.0
-    if tip.get("odds_estimated"):
-        odds_label = "Estimated Odds Range"
-        low = _f(tip.get("estimated_odds_low"))
-        high = _f(tip.get("estimated_odds_high"))
-        if low is not None and high is not None:
-            odds_text = f"{low:.2f}–{high:.2f}"
-        else:
-            odds_text = f"~{odds:.2f}"
+    base_market = str(tip.get("base_market_name") or _strip_period_display(market) or "Market").strip()
+    period = _canonical_period(tip.get("period"), market)
+    period_text = _period_label(period)
+    selection = _display_selection(base_market, tip.get("selection"))
+    family = _canonical_market(base_market)
+
+    if family == "total":
+        # User-facing wording: "Regular Time — Over (1.5)" / "1st Half — Over (0.5)".
+        market_text = f"{period_text} — {selection}"
+    elif selection:
+        market_text = f"{period_text} — {base_market} — {selection}"
     else:
-        odds_label = "Odds"
-        odds_text = f"{odds:.3f}"
+        market_text = f"{period_text} — {base_market}"
+
+    probability = float(tip.get("model_probability") or 0.0) * 100.0
+    odds_line = ""
+    # Never show synthetic/estimated prices to customers. If the exact bookmaker
+    # quote was visible in the screenshot, keep that real quote because it is useful.
+    if not tip.get("odds_estimated"):
+        odds = float(tip.get("odds") or 0.0)
+        if odds > 1.0:
+            odds_line = f"💰 Odds: {odds:.3f}\n"
 
     return (
-        f"👑 BETTING BAYIN {V13_VERSION}\n\n"
+        "👑 BETTING BAYIN PRE-BET\n\n"
         f"⚽ {home} vs {away}\n"
         f"🏆 {league}\n"
-        f"🎫 {bet_type}\n\n"
+        "🎫 Pre Bet\n\n"
         f"🎯 TIP: {market_text}\n"
-        f"💰 {odds_label}: {odds_text}\n"
+        f"{odds_line}"
         f"📊 Win Chance: {probability:.0f}%"
     )

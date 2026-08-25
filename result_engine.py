@@ -6,8 +6,29 @@ def _norm(value):
     return " ".join(str(value or "").strip().lower().replace("−", "-").split())
 
 
-def market_family(market_name):
+def market_period(market_name):
     m = _norm(market_name)
+    compact = re.sub(r"[^a-z0-9]+", "", m)
+    if any(x in compact for x in ("1sthalf", "firsthalf", "1half", "half1")):
+        return "1st_half"
+    if any(x in compact for x in ("2ndhalf", "secondhalf", "2half", "half2")):
+        return "2nd_half"
+    return "regular_time"
+
+
+def _strip_period(market_name):
+    m = _norm(market_name)
+    for pattern in (
+        r"\bregular\s*time\b", r"\bfull\s*time\b", r"\b90\s*min(?:ute)?s?\b",
+        r"\b1st\s*half\b", r"\bfirst\s*half\b",
+        r"\b2nd\s*half\b", r"\bsecond\s*half\b",
+    ):
+        m = re.sub(pattern, " ", m)
+    return " ".join(m.split()).strip(" -—:")
+
+
+def market_family(market_name):
+    m = _strip_period(market_name)
     compact = re.sub(r"[\s_-]+", "", m)
     if compact in {"1x2", "matchresult", "fulltimeresult", "regularresult"}:
         return "1x2"
@@ -56,22 +77,23 @@ def canonical_selection(market_name, selection):
 
 
 def calibration_key(market_name, selection):
+    period = market_period(market_name)
     fam = market_family(market_name)
     sel = canonical_selection(market_name, selection)
+    prefix = f"{period}:"
     if fam in {"total", "home_team_total", "away_team_total"}:
         direction = "over" if "over" in sel else ("under" if "under" in sel else "other")
-        return f"{fam}:{direction}"
+        return f"{prefix}{fam}:{direction}"
     if fam in {"1x2", "double_chance", "btts", "home_clean_sheet", "away_clean_sheet", "at_least_one_team_scores"}:
-        return f"{fam}:{sel}"
+        return f"{prefix}{fam}:{sel}"
     if fam == "correct_score":
-        return fam
-    return fam
-
+        return f"{prefix}{fam}"
+    return f"{prefix}{fam}"
 
 def build_prediction_key(home_team, away_team, competition, match_date, market_name, selection):
     raw = "|".join([
         _norm(home_team), _norm(away_team), _norm(competition), _norm(match_date),
-        market_family(market_name), canonical_selection(market_name, selection),
+        market_period(market_name), market_family(market_name), canonical_selection(market_name, selection),
     ])
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -96,6 +118,12 @@ def settle_market(market_name, selection, home_score, away_score):
 
     Returns win/loss/void, or None when the market needs data beyond the final score.
     """
+    # Final-score settlement is valid only for Regular Time markets. Half-market
+    # tips must not contaminate learning with a full-time score. They remain
+    # unresolved unless manually settled with the correct period result.
+    if market_period(market_name) != "regular_time":
+        return None
+
     try:
         h = int(home_score)
         a = int(away_score)

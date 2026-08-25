@@ -15,6 +15,7 @@ from strength_engine import calculate_match_strength
 from probability_engine import calculate_match_probabilities
 from calibration_engine import calibrate_probability_model
 from value_engine import calculate_market_value
+from context_profile import build_match_context_profile
 from v13_engine import build_v13_decision
 
 
@@ -23,7 +24,7 @@ from v13_engine import build_v13_decision
 # UNIFIED PIPELINE ENGINE
 # =========================================================
 
-PIPELINE_VERSION = "V15.0 FINAL PRE-BET"
+PIPELINE_VERSION = "V16.2 PRE-BET"
 
 
 def _required_match_fields(extracted_data):
@@ -106,6 +107,9 @@ def _load_or_research(home, away, competition, match_date, force_refresh=False):
 
 def _run_models(market_analysis, research):
     strength = calculate_match_strength(research)
+    # Dynamic league/team context: verified web aggregates when available,
+    # otherwise conservative signals derived from verified recent results.
+    strength["context_profile"] = build_match_context_profile(research)
     probability = calculate_match_probabilities(strength)
     calibration = calibrate_probability_model(probability)
     value = calculate_market_value(
@@ -187,7 +191,7 @@ def run_full_pipeline(
             "pipeline_version": PIPELINE_VERSION,
             "status": "LIVE_NOT_SUPPORTED",
             "decision": "PASS",
-            "reason": "V15.0 FINAL PRE-BET supports pre-match screenshots only. Live screenshots are blocked.",
+            "reason": "Betting Bayin PRE-BET supports pre-match screenshots only. Live screenshots are blocked.",
             "extracted_data": extracted_data,
         }
 

@@ -355,6 +355,41 @@ JSON only.
 Return:
 {{
   "league_context": null,
+  "league_profile": {
+    "season": null,
+    "sample_size": 0,
+    "avg_total_goals": null,
+    "over_1_5_rate": null,
+    "over_2_5_rate": null,
+    "over_3_5_rate": null,
+    "btts_rate": null,
+    "style_tags": [],
+    "source_urls": []
+  },
+  "home_team_profile": {
+    "sample_size": 0,
+    "avg_goals_for": null,
+    "avg_goals_against": null,
+    "avg_total_goals": null,
+    "over_1_5_rate": null,
+    "over_2_5_rate": null,
+    "over_3_5_rate": null,
+    "btts_rate": null,
+    "style_tags": [],
+    "source_urls": []
+  },
+  "away_team_profile": {
+    "sample_size": 0,
+    "avg_goals_for": null,
+    "avg_goals_against": null,
+    "avg_total_goals": null,
+    "over_1_5_rate": null,
+    "over_2_5_rate": null,
+    "over_3_5_rate": null,
+    "btts_rate": null,
+    "style_tags": [],
+    "source_urls": []
+  },
   "match_importance": null,
   "rest_and_schedule": {{
     "home": null,
@@ -799,6 +834,41 @@ Return exactly this shape:
   "lineups": {{"home": null, "away": null}},
   "key_players": {{"home": [], "away": []}},
   "league_context": null,
+  "league_profile": {{
+    "season": null,
+    "sample_size": 0,
+    "avg_total_goals": null,
+    "over_1_5_rate": null,
+    "over_2_5_rate": null,
+    "over_3_5_rate": null,
+    "btts_rate": null,
+    "style_tags": [],
+    "source_urls": []
+  }},
+  "home_team_profile": {{
+    "sample_size": 0,
+    "avg_goals_for": null,
+    "avg_goals_against": null,
+    "avg_total_goals": null,
+    "over_1_5_rate": null,
+    "over_2_5_rate": null,
+    "over_3_5_rate": null,
+    "btts_rate": null,
+    "style_tags": [],
+    "source_urls": []
+  }},
+  "away_team_profile": {{
+    "sample_size": 0,
+    "avg_goals_for": null,
+    "avg_goals_against": null,
+    "avg_total_goals": null,
+    "over_1_5_rate": null,
+    "over_2_5_rate": null,
+    "over_3_5_rate": null,
+    "btts_rate": null,
+    "style_tags": [],
+    "source_urls": []
+  }},
   "match_importance": null,
   "rest_and_schedule": {{"home": null, "away": null}},
   "head_to_head_matches": []
@@ -808,6 +878,11 @@ Rules:
 - Maximum 5 recent matches per team.
 - Completed matches only and strictly before target date.
 - Omit unverified injuries/suspensions instead of guessing.
+- For league_profile and team_profile, use numeric aggregates only when a source explicitly supports them.
+- source_urls are mandatory for web aggregate profiles; otherwise return null/0/empty values.
+- Prefer current-season or the most recent completed season available before the target date.
+- style_tags must be short evidence-based descriptions such as high-scoring, low-block, transition-heavy, possession-heavy, open-defence. Never infer style from reputation alone.
+- Never assume a small/youth/lower league is high scoring unless verified results/profile data supports it.
 - Do not search for bookmaker odds.
 """
 
@@ -850,6 +925,9 @@ Rules:
         "key_players": team_news["key_players"],
         "head_to_head_matches": context["head_to_head_matches"],
         "league_context": context["league_context"],
+        "league_profile": result.get("league_profile") or {},
+        "home_team_profile": result.get("home_team_profile") or {},
+        "away_team_profile": result.get("away_team_profile") or {},
         "rest_and_schedule": context["rest_and_schedule"],
         "match_importance": context["match_importance"],
         "research_quality": quality,
