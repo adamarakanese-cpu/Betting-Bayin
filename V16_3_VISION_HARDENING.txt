@@ -1,0 +1,9 @@
+BETTING BAYIN V16.3
+
+Production vision hardening:
+- Retry Groq vision BadRequest/malformed JSON with normalized JPEG.
+- Disable reasoning for extraction JSON requests.
+- Final fallback retries without response_format while enforcing JSON-only prompt.
+- Telegram album no longer fails completely when one screenshot page is rejected.
+- Exact per-page upstream error is logged in Render for diagnosis.
+- Keeps V16.2 period-aware markets, real-odds priority, league/team context, parlay, persistence and result learning.

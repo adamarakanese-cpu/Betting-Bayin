@@ -5,6 +5,7 @@ import tempfile
 import asyncio
 import threading
 import html
+import re
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -50,7 +51,7 @@ from screenshot_merge import merge_extractions
 
 
 # =========================================================
-# BETTING BAYIN V16.2 PRE-BET
+# BETTING BAYIN V16.3 PRE-BET
 # TELEGRAM BOT + FULL AI PIPELINE + RENDER HEALTH SERVER
 # =========================================================
 
@@ -219,10 +220,58 @@ def image_to_data_url(image_path):
     return f"data:image/jpeg;base64,{encoded}"
 
 
-def analyze_screenshot(image_path):
-    image_url = image_to_data_url(image_path)
+def _clean_vision_json(content):
+    text = str(content or "").strip()
+    text = text.replace("```json", "").replace("```JSON", "").replace("```", "").strip()
+    try:
+        return json.loads(text)
+    except Exception:
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if match:
+            return json.loads(match.group(0))
+        raise
 
-    response = groq_client.chat.completions.create(
+
+def _make_safe_vision_copy(image_path):
+    """Normalize unusually large/problematic Telegram images for a retry.
+
+    Telegram albums can contain tall screenshots. Some otherwise valid image
+    payloads can be rejected by the upstream vision endpoint with HTTP 400.
+    This fallback keeps the original untouched and creates a conservative JPEG
+    copy only when a retry is needed.
+    """
+    try:
+        from PIL import Image, ImageOps
+    except Exception:
+        return None
+
+    safe_path = None
+    try:
+        with Image.open(image_path) as img:
+            img = ImageOps.exif_transpose(img).convert("RGB")
+            max_side = max(img.size)
+            if max_side > 2400:
+                scale = 2400.0 / float(max_side)
+                img = img.resize(
+                    (max(1, int(img.width * scale)), max(1, int(img.height * scale))),
+                    Image.Resampling.LANCZOS,
+                )
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as out:
+                safe_path = out.name
+            img.save(safe_path, format="JPEG", quality=88, optimize=True)
+        return safe_path
+    except Exception:
+        if safe_path and os.path.exists(safe_path):
+            try:
+                os.remove(safe_path)
+            except Exception:
+                pass
+        return None
+
+
+def _vision_request(image_path, json_mode=True):
+    image_url = image_to_data_url(image_path)
+    kwargs = dict(
         model=VISION_MODEL,
         messages=[
             {
@@ -234,7 +283,10 @@ def analyze_screenshot(image_path):
                 "content": [
                     {
                         "type": "text",
-                        "text": "Read this betting screenshot and extract every visible betting detail.",
+                        "text": (
+                            "Read this betting screenshot and extract every visible betting detail. "
+                            "Return JSON only."
+                        ),
                     },
                     {
                         "type": "image_url",
@@ -244,10 +296,48 @@ def analyze_screenshot(image_path):
             },
         ],
         temperature=0,
-        response_format={"type": "json_object"},
+        max_completion_tokens=4096,
+        reasoning_effort="none",
     )
+    if json_mode:
+        kwargs["response_format"] = {"type": "json_object"}
+    response = groq_client.chat.completions.create(**kwargs)
+    return _clean_vision_json(response.choices[0].message.content)
 
-    return json.loads(response.choices[0].message.content)
+
+def analyze_screenshot(image_path):
+    """Robust single-page extraction with safe retries.
+
+    Attempt 1 uses the original Telegram image in JSON mode. If the vision API
+    rejects that image with a BadRequest or returns malformed JSON, retry a
+    normalized JPEG. A final retry removes response_format while keeping the
+    prompt JSON-only.
+    """
+    errors = []
+    safe_path = None
+    try:
+        for path, json_mode in [(image_path, True)]:
+            try:
+                return _vision_request(path, json_mode=json_mode)
+            except Exception as error:
+                errors.append(repr(error))
+
+        safe_path = _make_safe_vision_copy(image_path)
+        retry_path = safe_path or image_path
+
+        for json_mode in (True, False):
+            try:
+                return _vision_request(retry_path, json_mode=json_mode)
+            except Exception as error:
+                errors.append(repr(error))
+
+        raise RuntimeError("Vision extraction failed after retries: " + " | ".join(errors[-3:]))
+    finally:
+        if safe_path and os.path.exists(safe_path):
+            try:
+                os.remove(safe_path)
+            except Exception:
+                pass
 
 
 
@@ -984,8 +1074,26 @@ async def _process_photo_file_ids(update, context, file_ids):
         # Accuracy first: extract every screenshot. This ensures Total/Handicap/
         # other pages sent in the same Telegram album are not silently ignored.
         extractions = []
-        for temp_path in temp_paths:
-            extractions.append(await asyncio.to_thread(analyze_screenshot, temp_path))
+        page_errors = []
+        for page_index, temp_path in enumerate(temp_paths, start=1):
+            try:
+                extracted_page = await asyncio.to_thread(analyze_screenshot, temp_path)
+                if isinstance(extracted_page, dict):
+                    extractions.append(extracted_page)
+                else:
+                    page_errors.append(f"page {page_index}: invalid extraction type")
+            except Exception as error:
+                # One bad page must not destroy an otherwise usable Telegram album.
+                # Keep the exact upstream detail in Render logs for diagnosis.
+                detail = f"page {page_index}: {type(error).__name__}: {error}"
+                page_errors.append(detail)
+                print("VISION PAGE ERROR:", detail)
+
+        if not extractions:
+            raise RuntimeError(
+                "All screenshot pages failed vision extraction. " +
+                " | ".join(page_errors[-4:])
+            )
 
         # Group by match identity. Same-match pages are merged; different matches
         # in one album remain independent.
@@ -1000,6 +1108,9 @@ async def _process_photo_file_ids(update, context, file_ids):
 
         for key in order:
             merged = merge_extractions(groups[key])
+            merged["screenshots_received"] = len(unique_ids)
+            merged["screenshots_extracted"] = len(extractions)
+            merged["vision_page_errors"] = page_errors
             await _process_extracted_match(update, context, user, merged)
 
     except Exception as error:
