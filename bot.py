@@ -32,6 +32,11 @@ from database import (
     log_usage,
     save_tip,
     get_recent_tips,
+    get_performance_summary,
+    get_tracking_counts,
+    get_pending_predictions,
+    settle_prediction_score,
+    settle_prediction_manual,
 )
 
 from pipeline_engine import (
@@ -40,10 +45,11 @@ from pipeline_engine import (
 )
 from v13_engine import format_v13_tip
 from parlay_engine import build_best_parlay, format_parlay
+from result_tracker import check_pending_results, start_result_tracker
 
 
 # =========================================================
-# BETTING BAYIN V15.1 PRE-BET MENU
+# BETTING BAYIN V16.0 FINAL PRE-BET
 # TELEGRAM BOT + FULL AI PIPELINE + RENDER HEALTH SERVER
 # =========================================================
 
@@ -140,7 +146,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             payload = {
                 "ok": True,
                 "service": "Betting Bayin",
-                "version": "V15.1 PRE-BET MENU",
+                "version": "V16.0 FINAL PRE-BET",
                 "telegram_polling": True,
             }
             body = json.dumps(payload).encode("utf-8")
@@ -161,7 +167,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             body = json.dumps({
                 "ok": True,
                 "service": "Betting Bayin",
-                "version": "V15.1 PRE-BET MENU",
+                "version": "V16.0 FINAL PRE-BET",
                 "telegram_polling": True,
             }).encode("utf-8")
             self.send_response(200)
@@ -602,7 +608,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if is_admin(user.id):
         await update.message.reply_text(
-            "👑 BETTING BAYIN V15.1 PRE-BET\n\n"
+            "👑 BETTING BAYIN V16.0 FINAL PRE-BET\n\n"
             "🛡 ADMIN MODE\n\n"
             f"Admin ID: {user.id}\n\n"
             "COMMANDS\n"
@@ -610,7 +616,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "➕ /activate USER_ID DAYS\n"
             "⏳ /extend USER_ID DAYS\n"
             "🚫 /block USER_ID\n"
-            "🔎 /status USER_ID\n\n"
+            "🔎 /status USER_ID\n"
+            "📊 /performance\n"
+            "⏳ /pending\n"
+            "🔎 /checkresults\n"
+            "✅ /settle ID 2-1\n\n"
             "📸 Pre-match screenshot ပို့နိုင်ပါတယ်။",
             reply_markup=main_menu_keyboard(),
         )
@@ -621,7 +631,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if active:
         expiry_text = expires_at.strftime("%d-%m-%Y %H:%M UTC")
         await update.message.reply_text(
-            "👑 BETTING BAYIN V15.1 PRE-BET\n\n"
+            "👑 BETTING BAYIN PRE-BET\n\n"
             f"မင်္ဂလာပါ {user.first_name}!\n\n"
             "🟢 SUBSCRIPTION ACTIVE\n"
             f"⏳ လက်ကျန်: {remaining_subscription_text(expires_at)}\n"
@@ -776,6 +786,112 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except ValueError:
         await update.message.reply_text("❌ Invalid User ID")
+
+
+
+# =========================================================
+# RESULT TRACKING / PERFORMANCE ADMIN COMMANDS
+# =========================================================
+
+async def performance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ ADMIN ONLY")
+        return
+    summary = await asyncio.to_thread(get_performance_summary)
+    counts = await asyncio.to_thread(get_tracking_counts)
+    await update.message.reply_text(
+        "📊 BETTING BAYIN PERFORMANCE\n\n"
+        f"✅ Settled: {summary['total_settled']}\n"
+        f"🟢 Win: {summary['wins']}\n"
+        f"🔴 Loss: {summary['losses']}\n"
+        f"⚪ Void: {summary['voids']}\n"
+        f"🎯 Hit Rate: {summary['hit_rate'] * 100:.1f}%\n"
+        f"📐 Brier Score: {summary['brier_score']:.3f}\n\n"
+        f"💰 Actual-Odds Bets: {summary['actual_odds_bets']}\n"
+        f"📈 Profit: {summary['profit_units']:+.2f} units\n"
+        f"💹 ROI: {summary['roi'] * 100:+.1f}%\n\n"
+        f"🧠 Active Calibration Keys: {summary['calibration_active_keys']}\n"
+        f"🧠 Active Market Families: {summary['calibration_active_families']}\n"
+        f"⏳ Pending: {counts.get('pending', 0)} | Unresolved: {counts.get('unresolved', 0)}"
+    )
+
+
+async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ ADMIN ONLY")
+        return
+    rows = await asyncio.to_thread(get_pending_predictions, 10, 0.0, 0.0, True)
+    if not rows:
+        await update.message.reply_text("✅ Pending prediction မရှိပါ။")
+        return
+    lines = ["⏳ PENDING RESULT CHECKS", ""]
+    for row in rows:
+        lines.append(
+            f"#{row['id']} ⚽ {row.get('home_team')} vs {row.get('away_team')}\n"
+            f"🎯 {row.get('market_name')} — {row.get('selection')}\n"
+            f"📅 {row.get('match_date_text') or 'N/A'}"
+        )
+        lines.append("")
+    lines.append("Manual score: /settle ID 2-1\nManual override: /settle ID win|loss|void")
+    await update.message.reply_text("\n".join(lines)[:3900])
+
+
+async def checkresults_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ ADMIN ONLY")
+        return
+    await update.message.reply_text("🔎 Pending results စစ်နေပါတယ်…")
+    summary = await asyncio.to_thread(check_pending_results, 10, True)
+    await update.message.reply_text(
+        "📊 RESULT CHECK COMPLETE\n\n"
+        f"🔎 Checked: {summary.get('checked', 0)}\n"
+        f"✅ Settled: {summary.get('settled', 0)}\n"
+        f"⚠️ Unresolved: {summary.get('unresolved', 0)}"
+    )
+
+
+async def settle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ ADMIN ONLY")
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "အသုံးပြုပုံ:\n/settle ID 2-1\n/settle ID win|loss|void"
+        )
+        return
+    try:
+        prediction_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Invalid prediction ID")
+        return
+
+    value = str(context.args[1]).strip().lower().replace("–", "-")
+    try:
+        if value in {"win", "loss", "void"}:
+            row = await asyncio.to_thread(settle_prediction_manual, prediction_id, value)
+        else:
+            import re
+            m = re.fullmatch(r"(\d+)\s*[-:]\s*(\d+)", value)
+            if not m:
+                raise ValueError("Use score like 2-1 or win/loss/void")
+            row = await asyncio.to_thread(
+                settle_prediction_score,
+                prediction_id,
+                int(m.group(1)),
+                int(m.group(2)),
+                "admin_score",
+                1.0,
+            )
+        if not row:
+            await update.message.reply_text("❌ Prediction ID မတွေ့ပါ။")
+            return
+        await update.message.reply_text(
+            f"✅ #{prediction_id} → {str(row.get('result_status')).upper()}\n"
+            f"⚽ {row.get('home_team')} vs {row.get('away_team')}\n"
+            f"🎯 {row.get('market_name')} — {row.get('selection')}"
+        )
+    except Exception as error:
+        await update.message.reply_text(f"❌ Settle error: {error}")
 
 
 # =========================================================
@@ -958,7 +1074,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 def main():
-    print("👑 BETTING BAYIN V15.1 PRE-BET MENU")
+    print("👑 BETTING BAYIN V16.0 FINAL PRE-BET MENU")
     print("🟢 Starting...")
 
     if ADMIN_USER_ID:
@@ -968,6 +1084,8 @@ def main():
 
     # Render Web Service requires an open HTTP port.
     start_health_server()
+    # V16 result tracking runs independently and never blocks Telegram replies.
+    start_result_tracker(interval_seconds=3600)
 
     # Telegram can be slow or intermittently blocked on some networks.
     bot_request = HTTPXRequest(
@@ -1002,6 +1120,10 @@ def main():
     application.add_handler(CommandHandler("block", block_command))
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("parlay", parlay_command))
+    application.add_handler(CommandHandler("performance", performance_command))
+    application.add_handler(CommandHandler("pending", pending_command))
+    application.add_handler(CommandHandler("checkresults", checkresults_command))
+    application.add_handler(CommandHandler("settle", settle_command))
     application.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     application.add_handler(
         MessageHandler(

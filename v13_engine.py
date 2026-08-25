@@ -1,7 +1,8 @@
 import math
 from deepseek_verifier import verify_model_context
+from performance_engine import apply_performance_feedback
 
-V13_VERSION = "V15.0 FINAL PRE-BET"
+V13_VERSION = "V16.0 FINAL PRE-BET"
 
 
 def _f(v):
@@ -431,6 +432,9 @@ def build_v13_decision(extracted, research, probability, calibration):
         reliability = float((probability.get("model_confidence", {}) or {}).get("score", 0.0) or 0.0)
 
     ranked = rank_all_markets(extracted, probability, calibration, reliability, audit)
+    # V16: verified historical outcomes may apply a small sample-gated calibration
+    # correction. It is bounded and does nothing until enough settled picks exist.
+    ranked = apply_performance_feedback(ranked)
     if not ranked:
         return {
             "version": V13_VERSION, "status": "NO_SUPPORTED_VISIBLE_MARKET", "tip": None,

@@ -1,36 +1,33 @@
-BETTING BAYIN — V15.0 FINAL PRE-BET
+BETTING BAYIN — FINAL PRE-BET RELEASE V16.0
 
-FINAL RELEASE SCOPE
-- Football PRE-BET only. Live screenshots are rejected.
-- Screenshot-visible market/selection odds are the source of truth and always override model estimates.
-- Double Chance customer labels are normalized to 1X / 12 / 2X.
-- Hidden model-supported markets may be considered even when not visible in the screenshot.
-- Hidden prices are NEVER presented as live 1XBET prices; they are labeled Estimated Odds Range.
-- Internal ranking is probability/risk first. Long-shot EV cannot overpower safer supported markets.
-- Sparse/friendly/youth competitions receive uncertainty shrinkage.
-- Unsupported market families (for example cards/corners without statistical support) do not displace model-supported picks merely because the bookmaker price looks attractive.
-- Model-supported market discovery includes 1X2, Double Chance, Totals 0.5/1.5/2.5/3.5/4.5, BTTS, team scoring/clean sheet, at-least-one-team-to-score, and conservative Correct Score candidates.
-- Correct Score carries a strong risk penalty.
+Production stack
+- Telegram Pre-Bet screenshot input
+- Vision extraction with visible-odds priority
+- Research + probability + calibration + market ranking
+- Hidden supported-market discovery with estimated odds ranges
+- Single Tip output
+- Persistent Single -> Parlay history
+- Best 2-4 leg accumulator selection from recent tips
+- PostgreSQL persistent subscription and history support via DATABASE_URL
+- Telegram customer menu and admin support flow
+- Verified result tracking
+- Automatic performance measurement and bounded calibration feedback
 
-SINGLE -> PARLAY MEMORY
-- Every final single tip is stored per Telegram user.
-- Natural-language requests such as "ခုနက ၅ ပွဲကို မောင်းတွဲ" or "last 5 parlay" use that user's recent tip history.
-- The N recent tips are a candidate pool; the engine selects the strongest 2-4 legs rather than forcing every match into the accumulator.
-- Duplicate matches are removed.
-- Low-probability legs are filtered when safer legs exist.
-- Combined probability compounds leg probabilities; uncertainty compounds too.
-- Actual odds stay actual. Any accumulator containing model-only prices is labeled Combined Estimated Odds.
+Final production rules
+1. Screenshot-visible odds always override estimated/synthetic odds for the same market selection.
+2. Double Chance customer labels are 1X / 12 / 2X.
+3. Hidden market prices are shown only as Estimated Odds Range.
+4. Live screenshots are rejected by the Pre-Bet bot.
+5. Low-data competitions receive uncertainty penalties.
+6. Parlay never forces all supplied matches into the accumulator.
+7. Result tracking never guesses an unverified final score.
+8. Performance learning activates only after sample thresholds and is capped at +/-4pp.
+9. Estimated odds are excluded from ROI accounting.
+10. Customer tip delivery continues even if performance tracking is temporarily unavailable.
 
-PERSISTENCE
-- Production should set DATABASE_URL to a persistent PostgreSQL database.
-- SQLite remains a local/dev fallback only. Render free local disk is not reliable persistent storage across rebuilds/restarts.
-- The same database stores subscription users, usage logs, and tip_history.
-
-CUSTOMER OUTPUT
-- Concise: match, league, bet type, final tip, odds/estimated range, win chance.
-- No internal EV/edge/audit/model-debug text is shown to customers.
-
-NOT CLAIMED
-- No guaranteed win rate or "sure win" claim.
-- No live 1XBET hidden-market price is invented.
-- Cards/corners/other unsupported model families are not fabricated from no data.
+Admin result commands
+/performance
+/pending
+/checkresults
+/settle ID 2-1
+/settle ID win|loss|void
