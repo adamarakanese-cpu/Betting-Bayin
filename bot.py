@@ -4,6 +4,7 @@ import json
 import tempfile
 import asyncio
 import threading
+import html
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -504,11 +505,12 @@ def remaining_subscription_text(expires_at):
 
 async def show_start_ready(update: Update):
     await update.message.reply_text(
-        "👑 BETTING BAYIN V15.1 PRE-BET\n\n"
+        "👑 BETTING BAYIN PRE-BET\n\n"
         "📸 1XBET Pre-Bet Screenshot ပို့ပါ။\n"
         "🎯 Single Tip ကို အလိုအလျောက်ရွေးပေးပါမယ်။\n\n"
-        "🔥 မောင်းတွဲချင်ရင် Screenshot တွေ တစ်ပွဲချင်းပို့ပြီး\n"
-        "‘ခုနက 5 ပွဲကို မောင်းတွဲ’ လို့ပို့နိုင်ပါတယ်။",
+        "🔥 မောင်းတွဲချင်ရင် Screenshot တွေ တစ်ပွဲချင်းပို့ပြီး ၅ပွဲပြည့်တဲ့အခါ\n"
+        "‘ခုနက 5 ပွဲကို မောင်းတွဲ’ လို့ပို့နိုင်ပါတယ်။\n"
+        "၅ပွဲထဲမှ အကောင်းဆုံးပွဲများကိုရွေးချယ်ပြီးပြန်ပို့ပေးပါမယ်။",
         reply_markup=main_menu_keyboard(),
     )
 
@@ -536,8 +538,9 @@ async def show_balance(update: Update, user):
             "📊 SUBSCRIPTION လက်ကျန်\n\n"
             f"🔴 Status: {str(status).upper()}\n"
             "⏳ လက်ကျန်: 0 ရက်\n\n"
-            "Subscription ဝယ်ယူရန် အပေါ်က ခလုတ်ကိုနှိပ်ပါ။",
+            "Subscription ဝယ်ယူလိုပါ <b>Subscription ဝယ်ယူရန်</b> ခလုတ်ကိုနှိပ်ပေးပါ။",
             reply_markup=main_menu_keyboard(),
+            parse_mode="HTML",
         )
 
 
@@ -569,7 +572,7 @@ async def show_help(update: Update):
         "1️⃣ ▶️ Start ကိုနှိပ်ပါ။\n"
         "2️⃣ 1XBET Pre-Bet Match Screenshot တစ်ပုံပို့ပါ။\n"
         "3️⃣ Bot က အကောင်းဆုံး Single Tip ကို ပြန်ပေးပါမယ်။\n"
-        "4️⃣ မောင်းတွဲချင်ရင် ပွဲတွေကို တစ်ပွဲချင်းပို့ပါ။\n"
+        "4️⃣ မောင်းတွဲချင်ရင် Screenshot တွေ တစ်ပွဲချင်းပို့ပြီး ၅ပွဲပြည့်အောင်ပို့ပါ။\n"
         "5️⃣ ပြီးရင် ‘ခုနက 5 ပွဲကို မောင်းတွဲ’ လို့ပို့ပါ။\n\n"
         "⚠️ Live match screenshot မဟုတ်ဘဲ Pre-Bet screenshot ပို့ပါ။",
         reply_markup=main_menu_keyboard(),
@@ -628,16 +631,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    safe_first_name = html.escape(user.first_name or "User")
     await update.message.reply_text(
         "👑 BETTING BAYIN\n\n"
-        f"မင်္ဂလာပါ {user.first_name}!\n\n"
+        f"မင်္ဂလာပါ {safe_first_name}!\n\n"
         "🔒 Subscription မရှိသေးပါ။\n\n"
         "💳 WEEKLY PLAN\n"
         "7 Days — 50,000 MMK\n\n"
         "🆔 YOUR USER ID\n"
         f"{user.id}\n\n"
-        "Subscription ဝယ်ယူရန် အပေါ်က ခလုတ်ကိုနှိပ်ပါ။",
+        "Subscription ဝယ်ယူလိုပါ <b>Subscription ဝယ်ယူရန်</b> ခလုတ်ကိုနှိပ်ပေးပါ။",
         reply_markup=main_menu_keyboard(),
+        parse_mode="HTML",
     )
 
 
@@ -941,7 +946,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "👑 BETTING BAYIN V15.1 PRE-BET\n\n"
+        "👑 BETTING BAYIN PRE-BET\n\n"
         "အောက်က Menu ကနေ ရွေးချယ်နိုင်ပါတယ်။\n"
         "📸 Tip ယူရန် Pre-Bet Screenshot ကို တိုက်ရိုက်ပို့နိုင်ပါတယ်။",
         reply_markup=main_menu_keyboard(),

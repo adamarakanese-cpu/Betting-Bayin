@@ -1,0 +1,9 @@
+BETTING BAYIN V15.2 MENU TEXT POLISH
+
+- Reworded subscription purchase prompt.
+- Bolded “Subscription ဝယ်ယူရန်” in purchase prompts using Telegram HTML.
+- Removed V15.1 from customer-facing Pre-Bet ready title.
+- Clarified that parlay users should send 5 screenshots first.
+- Clarified that the bot selects the best matches from those 5.
+- Updated Help step 4 to require 5 screenshots for the described workflow.
+- Prediction and parlay engines unchanged.
