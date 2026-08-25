@@ -6,6 +6,10 @@ import asyncio
 import threading
 import html
 import re
+import time
+import hashlib
+import copy
+import httpx
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -52,13 +56,17 @@ from match_reconcile import reconcile_album_extractions
 
 
 # =========================================================
-# BETTING BAYIN V17.0 FINAL PRE-BET
+# BETTING BAYIN V18.0 SPEED ROUTER
 # TELEGRAM BOT + FULL AI PIPELINE + RENDER HEALTH SERVER
 # =========================================================
 
 load_dotenv()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-5.4-mini").strip()
+VISION_PROVIDER = os.getenv("VISION_PROVIDER", "auto").strip().lower()
+OPENAI_VISION_TIMEOUT = float(os.getenv("OPENAI_VISION_TIMEOUT", "35"))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_USER_ID_RAW = os.getenv("ADMIN_USER_ID", "").strip()
 ADMIN_USERNAME_RAW = os.getenv("ADMIN_USERNAME", "").strip()
@@ -152,7 +160,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             payload = {
                 "ok": True,
                 "service": "Betting Bayin",
-                "version": "V17.0 FINAL PRE-BET",
+                "version": "V18.0 SPEED ROUTER",
                 "telegram_polling": True,
             }
             body = json.dumps(payload).encode("utf-8")
@@ -173,7 +181,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             body = json.dumps({
                 "ok": True,
                 "service": "Betting Bayin",
-                "version": "V17.0 FINAL PRE-BET",
+                "version": "V18.0 SPEED ROUTER",
                 "telegram_polling": True,
             }).encode("utf-8")
             self.send_response(200)
@@ -340,6 +348,122 @@ def analyze_screenshot(image_path):
             except Exception:
                 pass
 
+
+
+# =========================================================
+# V18 FAST VISION ROUTER / CACHE
+# =========================================================
+
+_VISION_CACHE = {}
+_VISION_CACHE_LOCK = threading.Lock()
+_VISION_CACHE_MAX = int(os.getenv("VISION_CACHE_MAX", "128"))
+
+def _image_fingerprint(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+def _cache_get(key):
+    with _VISION_CACHE_LOCK:
+        value = _VISION_CACHE.get(key)
+        return copy.deepcopy(value) if value is not None else None
+
+def _cache_put(key, value):
+    with _VISION_CACHE_LOCK:
+        if len(_VISION_CACHE) >= _VISION_CACHE_MAX:
+            try:
+                _VISION_CACHE.pop(next(iter(_VISION_CACHE)))
+            except Exception:
+                _VISION_CACHE.clear()
+        _VISION_CACHE[key] = copy.deepcopy(value)
+
+def _openai_extract_images(image_paths):
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY not configured")
+    content = [{
+        "type": "text",
+        "text": (
+            "These images are pages/screenshots for ONE football pre-bet fixture. "
+            "Read ALL pages together, merge all visible markets and odds, preserve each market period, "
+            "and return exactly one JSON object matching the system schema. Never invent hidden data. JSON only."
+        ),
+    }]
+    for path in image_paths:
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": image_to_data_url(path), "detail": "low"},
+        })
+    payload = {
+        "model": OPENAI_VISION_MODEL,
+        "messages": [
+            {"role": "system", "content": VISION_SYSTEM_PROMPT},
+            {"role": "user", "content": content},
+        ],
+        "response_format": {"type": "json_object"},
+        "max_completion_tokens": 3500,
+    }
+    with httpx.Client(timeout=OPENAI_VISION_TIMEOUT) as client:
+        r = client.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+            json=payload,
+        )
+        r.raise_for_status()
+        data = r.json()
+    return _clean_vision_json(data["choices"][0]["message"]["content"])
+
+def analyze_images_fast(image_paths):
+    """V18: one OpenAI request for a whole album; Groq parallel fallback."""
+    paths = list(image_paths or [])
+    if not paths:
+        raise ValueError("No image paths")
+    cache_key = "album:" + ":".join(_image_fingerprint(p) for p in paths)
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        cached["vision_provider"] = "cache"
+        return cached
+
+    errors = []
+    use_openai = OPENAI_API_KEY and VISION_PROVIDER in {"auto", "openai"}
+    if use_openai:
+        try:
+            started = time.perf_counter()
+            result = _openai_extract_images(paths)
+            result["vision_provider"] = "openai"
+            result["vision_seconds"] = round(time.perf_counter() - started, 3)
+            result["screenshots_merged"] = len(paths)
+            _cache_put(cache_key, result)
+            return result
+        except Exception as e:
+            errors.append(f"openai: {type(e).__name__}: {e}")
+            print("OPENAI VISION FALLBACK:", errors[-1])
+            if VISION_PROVIDER == "openai":
+                raise
+
+    # Existing Groq path remains a production fallback.
+    started = time.perf_counter()
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=min(6, len(paths))) as pool:
+        futures = [pool.submit(analyze_screenshot, p) for p in paths]
+        extracted = []
+        for idx, f in enumerate(futures, 1):
+            try:
+                extracted.append(f.result())
+            except Exception as e:
+                errors.append(f"groq page {idx}: {type(e).__name__}: {e}")
+    if not extracted:
+        raise RuntimeError("Vision failed: " + " | ".join(errors[-5:]))
+    reconciled, identity_meta = reconcile_album_extractions(extracted)
+    result = merge_extractions(reconciled)
+    result["album_identity"] = identity_meta
+    result["vision_provider"] = "groq"
+    result["vision_seconds"] = round(time.perf_counter() - started, 3)
+    result["vision_page_errors"] = errors
+    result["screenshots_merged"] = len(paths)
+    _cache_put(cache_key, result)
+    return result
 
 
 # =========================================================
@@ -993,7 +1117,7 @@ async def settle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # PHOTO HANDLER
 # =========================================================
 
-MEDIA_GROUP_WAIT_SECONDS = float(os.getenv("MEDIA_GROUP_WAIT_SECONDS", "1.35"))
+MEDIA_GROUP_WAIT_SECONDS = float(os.getenv("MEDIA_GROUP_WAIT_SECONDS", "0.55"))
 MAX_SCREENSHOTS_PER_MATCH_BATCH = 8
 
 
@@ -1072,40 +1196,16 @@ async def _process_photo_file_ids(update, context, file_ids):
             temp_paths.append(temp_path)
             await telegram_file.download_to_drive(temp_path)
 
-        # Accuracy first: extract every screenshot. This ensures Total/Handicap/
-        # other pages sent in the same Telegram album are not silently ignored.
-        # V17: vision pages run concurrently. One slow screenshot no longer serially
-        # delays every other page in the album.
-        page_errors = []
-        raw_results = await asyncio.gather(
-            *(asyncio.to_thread(analyze_screenshot, path) for path in temp_paths),
-            return_exceptions=True,
-        )
-        extractions = []
-        for page_index, item in enumerate(raw_results, start=1):
-            if isinstance(item, Exception):
-                detail = f"page {page_index}: {type(item).__name__}: {item}"
-                page_errors.append(detail); print("VISION PAGE ERROR:", detail)
-            elif isinstance(item, dict):
-                extractions.append(item)
-            else:
-                page_errors.append(f"page {page_index}: invalid extraction type")
-
-        if not extractions:
-            raise RuntimeError(
-                "All screenshot pages failed vision extraction. " +
-                " | ".join(page_errors[-4:])
-            )
-
-        # V17 product rule: one Telegram album is ONE fixture and returns ONE tip.
-        # Reconcile OCR/vision team-name drift against the strongest page, then merge
-        # every visible period/market/odds page into one analysis.
-        reconciled, identity_meta = reconcile_album_extractions(extractions)
-        merged = merge_extractions(reconciled)
+        # V18 fast path: one multimodal request can read the entire album at once.
+        # This removes N serial/parallel provider round-trips and preserves all visible pages.
+        vision_started = time.perf_counter()
+        merged = await asyncio.to_thread(analyze_images_fast, temp_paths)
         merged["screenshots_received"] = len(unique_ids)
-        merged["screenshots_extracted"] = len(extractions)
-        merged["vision_page_errors"] = page_errors
-        merged["album_identity"] = identity_meta
+        merged["screenshots_extracted"] = len(unique_ids)
+        print(
+            f"V18 VISION: provider={merged.get('vision_provider')} "
+            f"pages={len(unique_ids)} seconds={time.perf_counter()-vision_started:.2f}"
+        )
         await _process_extracted_match(update, context, user, merged)
 
     except Exception as error:
@@ -1180,10 +1280,14 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         group["context"] = context
         if photo.file_id not in group["file_ids"]:
             group["file_ids"].append(photo.file_id)
-        if group.get("task") is None or group["task"].done():
-            group["task"] = asyncio.create_task(
-                _process_media_group_after_delay(context.application, group_key)
-            )
+        # Debounce from the LAST received album page, not the first one.
+        # This is both faster and safer for 3-8 screenshot albums.
+        old_task = group.get("task")
+        if old_task is not None and not old_task.done():
+            old_task.cancel()
+        group["task"] = asyncio.create_task(
+            _process_media_group_after_delay(context.application, group_key)
+        )
         return
 
     await _process_photo_file_ids(update, context, [photo.file_id])
@@ -1271,7 +1375,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 def main():
-    print("👑 BETTING BAYIN PRE-BET MENU")
+    print("👑 BETTING BAYIN V18 SPEED ROUTER")
+    print(f"⚡ Vision provider: {VISION_PROVIDER}; OpenAI configured: {bool(OPENAI_API_KEY)}")
     print("🟢 Starting...")
 
     if ADMIN_USER_ID:

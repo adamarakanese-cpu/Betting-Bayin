@@ -1,0 +1,16 @@
+BETTING BAYIN V18.0 SPEED ROUTER
+
+- OpenAI vision primary when OPENAI_API_KEY is configured
+- One OpenAI multimodal request reads an entire Telegram album
+- Groq remains automatic fallback
+- In-memory SHA-256 vision cache prevents duplicate re-analysis
+- Album debounce reduced to 0.55s and resets on each arriving page
+- Timing/provider logs added
+- Existing V17 research, knowledge, result tracking, calibration, parlay, subscriptions preserved
+
+Render environment:
+OPENAI_API_KEY=<your key>
+OPENAI_VISION_MODEL=gpt-5.4-mini
+VISION_PROVIDER=auto
+MEDIA_GROUP_WAIT_SECONDS=0.55
+OPENAI_VISION_TIMEOUT=35
