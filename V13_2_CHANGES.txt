@@ -1,0 +1,17 @@
+BETTING BAYIN V13.2
+
+QUALITY
+- Positive-EV candidates are preferred over negative-EV candidates.
+- Negative-EV picks are never labelled BEST VALUE.
+- If no positive-EV visible market exists, bot still returns a tip as SAFEST MODEL FALLBACK.
+- DeepSeek contradiction now reduces evidence confidence.
+- DeepSeek is labelled correctly as an evidence audit, not as proof the tip is correct.
+
+SPEED
+- DeepSeek network timeout reduced from 8s read to 4s read.
+- Groq research retries reduced to 1 to avoid long rate-limit stalls.
+- Existing match research cache remains enabled.
+
+IMPORTANT
+- No model can guarantee 99% betting accuracy.
+- Grade C / low evidence should be treated as materially weaker than Grade A/B.

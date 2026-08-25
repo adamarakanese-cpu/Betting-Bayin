@@ -1,0 +1,11 @@
+BETTING BAYIN V13.3
+
+- Accuracy-first precision gate: weak matches now return NO BET instead of a forced tip.
+- Positive EV and positive edge required.
+- Evidence confidence, model probability, odds and model/market disagreement gates added.
+- Club friendlies use substantially stricter thresholds.
+- DeepSeek remains an evidence auditor, not a probability generator.
+- Longshot EV traps are penalized; passed tips rank probability/evidence before EV.
+- Existing V13.2 single-pass research speed path retained.
+
+Important: 99% prediction accuracy is not guaranteed or claimed.

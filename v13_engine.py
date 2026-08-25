@@ -1,7 +1,7 @@
 import math
 from deepseek_verifier import verify_model_context
 
-V13_VERSION = "V13.2"
+V13_VERSION = "V13.3"
 
 
 def _f(v):
@@ -134,56 +134,95 @@ def rank_visible_markets(extracted, calibration, reliability, deepseek_audit=Non
     return sorted(candidates, key=lambda x: x["ranking_score"], reverse=True)
 
 
+def _is_friendly(extracted):
+    competition = _norm(extracted.get("competition"))
+    return "friendly" in competition or "club friendly" in competition
+
+
+def _precision_gate(candidate, reliability, audit, extracted):
+    """High-precision production gate. It is intentionally allowed to return NO BET."""
+    reasons = []
+    evidence = float(candidate.get("evidence_confidence", 0.0) or 0.0)
+    model_p = float(candidate.get("model_probability", 0.0) or 0.0)
+    market_p = float(candidate.get("market_probability", 0.0) or 0.0)
+    ev = float(candidate.get("expected_value", -1.0) or -1.0)
+    edge = float(candidate.get("edge", -1.0) or -1.0)
+    odds = float(candidate.get("odds", 99.0) or 99.0)
+
+    # DeepSeek is only an evidence auditor. An unavailable/failed audit cannot improve a bet.
+    if audit.get("enabled") and audit.get("status") != "OK":
+        evidence *= 0.85
+        reasons.append("AI evidence audit unavailable")
+    if audit.get("contradiction"):
+        evidence *= 0.70
+        reasons.append("evidence contradiction")
+
+    friendly = _is_friendly(extracted)
+    min_evidence = 0.88 if friendly else 0.72
+    min_probability = 0.78 if friendly else 0.66
+    min_ev = 0.015
+    min_edge = 0.010
+    max_odds = 2.20
+
+    if evidence < min_evidence:
+        reasons.append(f"evidence confidence {evidence:.1%} < {min_evidence:.0%}")
+    if model_p < min_probability:
+        reasons.append(f"model probability {model_p:.1%} < {min_probability:.0%}")
+    if ev < min_ev:
+        reasons.append(f"EV {ev:.1%} < {min_ev:.1%}")
+    if edge < min_edge:
+        reasons.append(f"edge {edge:.1%} < {min_edge:.1%}")
+    if odds > max_odds:
+        reasons.append(f"odds {odds:.2f} > {max_odds:.2f}")
+
+    # Large model/market disagreement is a warning, not automatically "value".
+    gap = abs(model_p - market_p)
+    if gap > 0.18 and evidence < 0.85:
+        reasons.append(f"model/market gap {gap:.1%} too large for evidence quality")
+
+    return not reasons, evidence, reasons
+
+
 def build_v13_decision(extracted, research, probability, calibration):
     audit = verify_model_context(research, probability)
     reliability = float(calibration.get("one_x_two", {}).get("reliability_factor", 0.0) or 0.0)
     if reliability <= 0.0:
         model_conf = probability.get("model_confidence", {}) or {}
         reliability = float(model_conf.get("score", 0.0) or 0.0)
+
     ranked = rank_visible_markets(extracted, calibration, reliability, audit)
-
     if not ranked:
-        return {
-            "version": V13_VERSION,
-            "status": "NO_SUPPORTED_VISIBLE_MARKET",
-            "tip": None,
-            "ranked_candidates": [],
-            "deepseek_audit": audit,
-            "reliability": reliability,
-        }
+        return {"version": V13_VERSION, "status": "NO_SUPPORTED_VISIBLE_MARKET", "tip": None,
+                "ranked_candidates": [], "deepseek_audit": audit, "reliability": reliability,
+                "gate_reasons": ["No supported visible market"]}
 
-    # V13.2: never call a negative-EV selection a value tip. Prefer positive-EV
-    # candidates; if none exist, still return the safest model fallback because
-    # the product is configured to always provide a tip.
-    positive = [c for c in ranked if c["expected_value"] >= 0.0 and c["edge"] >= 0.0]
-    if positive:
-        best = positive[0]
-        tip_mode = "VALUE"
-    else:
-        best = max(ranked, key=lambda c: (c["model_probability"] - c["risk_penalty"], c["ranking_score"]))
-        tip_mode = "SAFEST_FALLBACK"
+    # Accuracy-first: never force a tip. Only positive-EV candidates can enter the gate.
+    positive = [c for c in ranked if c["expected_value"] > 0 and c["edge"] > 0]
+    passed = []
+    rejected = []
+    for c in positive:
+        ok, adjusted_evidence, reasons = _precision_gate(c, reliability, audit, extracted)
+        cc = {**c, "evidence_confidence": adjusted_evidence}
+        if ok:
+            # Prefer probability first, then evidence, then modest EV. This avoids longshot EV traps.
+            precision_score = (cc["model_probability"] * 0.50 + adjusted_evidence * 0.35
+                               + min(cc["expected_value"], 0.12) * 0.15 - cc["risk_penalty"] * 0.20)
+            passed.append({**cc, "precision_score": precision_score})
+        else:
+            rejected.append({"candidate": cc, "reasons": reasons})
 
-    if audit.get("contradiction"):
-        best = {**best, "evidence_confidence": best["evidence_confidence"] * 0.75}
+    if not passed:
+        best_rejected = rejected[0] if rejected else None
+        return {"version": V13_VERSION, "status": "NO_BET_PRECISION_GATE", "tip": None,
+                "ranked_candidates": ranked[:8], "deepseek_audit": audit, "reliability": reliability,
+                "gate_reasons": (best_rejected or {}).get("reasons", ["No positive-EV candidate"]),
+                "best_rejected": (best_rejected or {}).get("candidate")}
 
-    if (tip_mode == "VALUE" and best["evidence_confidence"] >= 0.75
-            and best["model_probability"] >= 0.62 and best["expected_value"] >= 0.02):
-        grade = "A"
-    elif (tip_mode == "VALUE" and best["evidence_confidence"] >= 0.58
-          and best["model_probability"] >= 0.55 and best["expected_value"] >= 0.0):
-        grade = "B"
-    else:
-        grade = "C"
-
-    return {
-        "version": V13_VERSION,
-        "status": "TIP_READY",
-        "tip": {**best, "grade": grade, "tip_mode": tip_mode},
-        "ranked_candidates": ranked[:8],
-        "deepseek_audit": audit,
-        "reliability": reliability,
-    }
-
+    best = max(passed, key=lambda c: c["precision_score"])
+    grade = "A+" if (best["evidence_confidence"] >= 0.85 and best["model_probability"] >= 0.75) else "A"
+    return {"version": V13_VERSION, "status": "TIP_READY", "tip": {**best, "grade": grade, "tip_mode": "PRECISION"},
+            "ranked_candidates": ranked[:8], "deepseek_audit": audit, "reliability": reliability,
+            "gate_reasons": []}
 
 def format_v13_tip(result):
     match = result.get("match", {}) or {}
@@ -195,12 +234,16 @@ def format_v13_tip(result):
     league = match.get("competition") or extracted.get("competition") or "N/A"
 
     if not tip:
+        reasons = v13.get("gate_reasons") or []
+        reason_text = "\n".join(f"• {r}" for r in reasons[:4]) or "• Data quality/edge threshold not reached"
         return (
-            "👑 BETTING BAYIN V13\n\n"
+            "👑 BETTING BAYIN V13.3\n\n"
+            "🛑 NO BET — PRECISION GATE\n\n"
             f"⚽ ပွဲစဉ် (Match): {home} vs {away}\n"
             f"🏆 League: {league}\n\n"
-            "⚠️ Screenshot ထဲမှာ V13 model နဲ့တွက်နိုင်တဲ့ market/odds မလုံလောက်ပါ။\n"
-            "1X2, Double Chance, BTTS, Total 1.5/2.5/3.5 ပါအောင် screenshot ပြန်ပို့ပါ။"
+            "ဒီပွဲကို forced tip မပေးပါ။ Accuracy-first filter မကျော်ပါ။\n"
+            f"{reason_text}\n\n"
+            "🎯 Better signal ရှိတဲ့ပွဲကိုသာ TIP ထုတ်ပေးမည်။"
         )
 
     conf = tip["evidence_confidence"] * 100
@@ -208,14 +251,10 @@ def format_v13_tip(result):
     edge = tip["edge"] * 100
     ev = tip["expected_value"] * 100
     audit = v13.get("deepseek_audit", {}) or {}
-    ai_status = "DeepSeek evidence audit ✓" if audit.get("status") == "OK" else "Statistical Engine"
-    mode = tip.get("tip_mode", "VALUE")
-    title = "🎯 BEST VALUE MODEL TIP" if mode == "VALUE" else "🛡 SAFEST MODEL FALLBACK"
-    value_note = "" if mode == "VALUE" else "\n⚠️ Positive EV မတွေ့ပါ — safest visible model pick ဖြစ်ပါတယ်။\n"
-
+    ai_status = "DeepSeek evidence audit ✓" if audit.get("status") == "OK" else "Statistical evidence gate"
     return (
-        "👑 BETTING BAYIN V13\n\n"
-        f"{title}\n\n"
+        "👑 BETTING BAYIN V13.3\n\n"
+        "🎯 PRECISION-GATED TIP\n\n"
         f"⚽ ပွဲစဉ် (Match): {home} vs {away}\n"
         f"🏆 League: {league}\n"
         "🎫 လောင်းမည့်အမျိုးအစား (Bet Type): Pre Bet\n"
@@ -226,8 +265,7 @@ def format_v13_tip(result):
         f"💹 Expected Value: {ev:+.1f}%\n"
         f"🛡 Evidence Confidence: {conf:.1f}%\n"
         f"🏅 Grade: {tip['grade']}\n"
-        f"🤖 Verification: {ai_status}\n"
-        f"{value_note}\n"
-        "ℹ️ Probability = model estimate; Confidence = data/evidence quality. "
-        "99% accuracy is not guaranteed."
+        f"🤖 Verification: {ai_status}\n\n"
+        "ℹ️ V13.3 does not force a tip when evidence is weak. No model can guarantee 99% accuracy."
     )
+
