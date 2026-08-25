@@ -28,8 +28,8 @@ client = Groq(
 
 RESEARCH_MODEL = "groq/compound-mini"
 
-MAX_RETRIES = 3
-DEFAULT_RETRY_SECONDS = 15
+MAX_RETRIES = 2
+DEFAULT_RETRY_SECONDS = 5
 
 
 # =========================================================
@@ -757,200 +757,106 @@ def research_match(
     competition=None,
     match_date=None
 ):
+    """V13.1 fast research: one web-search call instead of four sequential calls."""
 
-    competition = (
-        competition
-        or "Unknown competition"
-    )
+    competition = competition or "Unknown competition"
+    match_date = match_date or "Unknown date"
 
-    match_date = (
-        match_date
-        or "Unknown date"
-    )
+    print("🌐 Research model:", RESEARCH_MODEL)
+    print("⚡ V13.1 Single-pass research")
 
-    print(
-        "🌐 Research model:",
-        RESEARCH_MODEL
-    )
+    prompt = f"""
+Research this football match in ONE compact pass.
 
-    print(
-        "🏠 Pass 1: Home recent matches"
-    )
+Match: {home_team} vs {away_team}
+Competition: {competition}
+Target date: {match_date}
 
-    home_result = (
-        research_recent_matches(
-            home_team,
-            competition,
-            match_date
-        )
-    )
+Return ONLY verified information available before the target date.
+Keep the answer compact. Never invent missing facts.
+Prefer ESPN, FotMob, UEFA, FIFA, BBC, Sky Sports, Soccerway,
+WorldFootball, Transfermarkt, Reuters and AP.
+Every recent-match or player-availability item should include source_url when available.
+No betting advice. JSON only.
 
-    print(
-        "✈️ Pass 2: Away recent matches"
-    )
+Return exactly this shape:
+{{
+  "home_recent_matches": [
+    {{
+      "date": "YYYY-MM-DD",
+      "opponent": "",
+      "venue": "home|away|neutral|unknown",
+      "goals_for": null,
+      "goals_against": null,
+      "result": "W|D|L",
+      "competition": "",
+      "source_url": ""
+    }}
+  ],
+  "away_recent_matches": [],
+  "injuries": {{"home": [], "away": []}},
+  "suspensions": {{"home": [], "away": []}},
+  "lineups": {{"home": null, "away": null}},
+  "key_players": {{"home": [], "away": []}},
+  "league_context": null,
+  "match_importance": null,
+  "rest_and_schedule": {{"home": null, "away": null}},
+  "head_to_head_matches": []
+}}
 
-    away_result = (
-        research_recent_matches(
-            away_team,
-            competition,
-            match_date
-        )
-    )
+Rules:
+- Maximum 5 recent matches per team.
+- Completed matches only and strictly before target date.
+- Omit unverified injuries/suspensions instead of guessing.
+- Do not search for bookmaker odds.
+"""
 
-    print(
-        "🩹 Pass 3: Team availability"
-    )
+    result = call_research(prompt)
+    if not isinstance(result, dict):
+        result = {"error": "Invalid research result"}
 
-    team_news = (
-        research_team_news(
-            home_team,
-            away_team,
-            match_date
-        )
-    )
+    home_matches = clean_match_records(result.get("home_recent_matches", []))
+    away_matches = clean_match_records(result.get("away_recent_matches", []))
 
-    print(
-        "🏆 Pass 4: Match context"
-    )
+    team_news = {
+        "injuries": result.get("injuries") or {"home": [], "away": []},
+        "suspensions": result.get("suspensions") or {"home": [], "away": []},
+        "lineups": result.get("lineups") or {"home": None, "away": None},
+        "key_players": result.get("key_players") or {"home": [], "away": []},
+    }
 
-    context = (
-        research_match_context(
-            home_team,
-            away_team,
-            competition,
-            match_date
-        )
-    )
+    context = {
+        "league_context": result.get("league_context"),
+        "match_importance": result.get("match_importance"),
+        "rest_and_schedule": result.get("rest_and_schedule") or {"home": None, "away": None},
+        "head_to_head_matches": result.get("head_to_head_matches") or [],
+    }
 
-    home_matches = (
-        clean_match_records(
-            home_result.get(
-                "matches",
-                []
-            )
-        )
-    )
-
-    away_matches = (
-        clean_match_records(
-            away_result.get(
-                "matches",
-                []
-            )
-        )
-    )
-
-    home_form = calculate_form(
-        home_matches
-    )
-
-    away_form = calculate_form(
-        away_matches
-    )
-
-    quality = (
-        calculate_research_quality(
-            home_matches,
-            away_matches,
-            team_news,
-            context
-        )
-    )
+    home_form = calculate_form(home_matches)
+    away_form = calculate_form(away_matches)
+    quality = calculate_research_quality(home_matches, away_matches, team_news, context)
 
     return {
         "home_team": home_team,
         "away_team": away_team,
         "competition": competition,
         "match_date": match_date,
-
-        "home_recent_matches": (
-            home_matches
-        ),
-
-        "away_recent_matches": (
-            away_matches
-        ),
-
-        "calculated_form": {
-            "home": home_form,
-            "away": away_form
-        },
-
-        "injuries": team_news.get(
-            "injuries",
-            {
-                "home": [],
-                "away": []
-            }
-        ),
-
-        "suspensions": team_news.get(
-            "suspensions",
-            {
-                "home": [],
-                "away": []
-            }
-        ),
-
-        "lineups": team_news.get(
-            "lineups",
-            {
-                "home": None,
-                "away": None
-            }
-        ),
-
-        "key_players": team_news.get(
-            "key_players",
-            {
-                "home": [],
-                "away": []
-            }
-        ),
-
-        "head_to_head_matches": (
-            context.get(
-                "head_to_head_matches",
-                []
-            )
-        ),
-
-        "league_context": (
-            context.get(
-                "league_context"
-            )
-        ),
-
-        "rest_and_schedule": (
-            context.get(
-                "rest_and_schedule",
-                {
-                    "home": None,
-                    "away": None
-                }
-            )
-        ),
-
-        "match_importance": (
-            context.get(
-                "match_importance"
-            )
-        ),
-
+        "home_recent_matches": home_matches,
+        "away_recent_matches": away_matches,
+        "calculated_form": {"home": home_form, "away": away_form},
+        "injuries": team_news["injuries"],
+        "suspensions": team_news["suspensions"],
+        "lineups": team_news["lineups"],
+        "key_players": team_news["key_players"],
+        "head_to_head_matches": context["head_to_head_matches"],
+        "league_context": context["league_context"],
+        "rest_and_schedule": context["rest_and_schedule"],
+        "match_importance": context["match_importance"],
         "research_quality": quality,
-
         "raw_research_errors": {
-            "home": home_result.get(
-                "error"
-            ),
-            "away": away_result.get(
-                "error"
-            ),
-            "team_news": team_news.get(
-                "error"
-            ),
-            "context": context.get(
-                "error"
-            )
-        }
+            "home": result.get("error"),
+            "away": result.get("error"),
+            "team_news": result.get("error"),
+            "context": result.get("error"),
+        },
     }

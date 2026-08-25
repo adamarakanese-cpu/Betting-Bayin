@@ -77,7 +77,7 @@ def verify_model_context(research, probability):
                 "Content-Type": "application/json",
             },
             json=body,
-            timeout=35,
+            timeout=(3.0, 8.0),
         )
         response.raise_for_status()
         content = response.json()["choices"][0]["message"]["content"]

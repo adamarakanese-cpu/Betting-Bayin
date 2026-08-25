@@ -1,7 +1,7 @@
 import math
 from deepseek_verifier import verify_model_context
 
-V13_VERSION = "V13.0"
+V13_VERSION = "V13.1"
 
 
 def _f(v):
@@ -137,6 +137,9 @@ def rank_visible_markets(extracted, calibration, reliability, deepseek_audit=Non
 def build_v13_decision(extracted, research, probability, calibration):
     audit = verify_model_context(research, probability)
     reliability = float(calibration.get("one_x_two", {}).get("reliability_factor", 0.0) or 0.0)
+    if reliability <= 0.0:
+        model_conf = probability.get("model_confidence", {}) or {}
+        reliability = float(model_conf.get("score", 0.0) or 0.0)
     ranked = rank_visible_markets(extracted, calibration, reliability, audit)
 
     if not ranked:
