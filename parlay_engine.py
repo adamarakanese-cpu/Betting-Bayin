@@ -152,7 +152,7 @@ def format_parlay(parlay):
             "Screenshot တွေတစ်ပွဲချင်းပို့ပြီးမှ ‘ခုနက 5 ပွဲကို မောင်းတွဲ’ လို့ပို့ပါ။"
         )
 
-    lines = ["👑 BETTING BAYIN PRE-BET — BEST ACCUMULATOR", ""]
+    lines = ["👑 SHWE OHH PRE-BET — BEST ACCUMULATOR", ""]
     for idx, leg in enumerate(parlay["legs"], 1):
         market = str(leg.get("market_name") or "Market")
         selection = str(leg.get("selection") or "")

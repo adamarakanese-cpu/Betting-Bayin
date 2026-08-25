@@ -10,6 +10,7 @@ import time
 import hashlib
 import copy
 import httpx
+import psycopg
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -73,6 +74,7 @@ ADMIN_USER_IDS_RAW = os.getenv("ADMIN_USER_IDS", "").strip()
 ADMIN_USERNAME_RAW = os.getenv("ADMIN_USERNAME", "shweohh_admin").strip()
 VISION_MODEL = os.getenv("VISION_MODEL", "qwen/qwen3.6-27b")
 PORT = int(os.getenv("PORT", "10000"))
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
 if not GROQ_API_KEY:
     raise RuntimeError("GROQ_API_KEY မတွေ့ပါ")
@@ -156,6 +158,54 @@ Return exactly:
   "unreadable_items": []
 }
 """
+
+
+# =========================================================
+# SINGLE TELEGRAM POLLER LOCK
+# Prevent Render rolling deploy overlap from starting two getUpdates loops.
+# The lock is PostgreSQL-backed and is released automatically when a process exits.
+# =========================================================
+
+_POLLING_LOCK_CONN = None
+
+def acquire_single_poller_lock():
+    global _POLLING_LOCK_CONN
+
+    if not DATABASE_URL:
+        print("⚠️ DATABASE_URL missing — single-poller lock disabled")
+        return None
+
+    # Stable positive 63-bit advisory-lock key unique to this Telegram bot token.
+    digest = hashlib.sha256(f"shwe-ohh-poller:{TELEGRAM_BOT_TOKEN}".encode("utf-8")).digest()
+    lock_id = int.from_bytes(digest[:8], "big") & 0x7FFFFFFFFFFFFFFF
+
+    waiting_logged = False
+    while True:
+        conn = None
+        try:
+            conn = psycopg.connect(DATABASE_URL, autocommit=True, connect_timeout=10)
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_try_advisory_lock(%s)", (lock_id,))
+                acquired = bool(cur.fetchone()[0])
+
+            if acquired:
+                _POLLING_LOCK_CONN = conn
+                print("🔒 Telegram single-poller lock acquired")
+                return conn
+
+            conn.close()
+            if not waiting_logged:
+                print("⏳ Previous Render instance is still polling; waiting for clean handover...")
+                waiting_logged = True
+        except Exception as error:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            print(f"⚠️ Poller-lock retry: {type(error).__name__}: {error}")
+
+        time.sleep(2.0)
 
 
 # =========================================================
@@ -1390,9 +1440,22 @@ def main():
     print(f"🛡 Admin IDs loaded: {sorted(ADMIN_USER_IDS)}")
     print(f"📩 Public admin: {ADMIN_CONTACT}")
 
-    # Render Web Service requires an open HTTP port.
+    # Render Web Service requires an open HTTP port. Start health first so a
+    # rolling deploy can become healthy before Telegram polling handover.
     start_health_server()
-    # V16 result tracking runs independently and never blocks Telegram replies.
+
+    # Give Render a short rolling-deploy handover window. This affects startup only,
+    # not screenshot analysis or reply speed. It also prevents the first hotfix
+    # deployment from overlapping the previous (non-locking) poller.
+    handover_grace = max(0.0, float(os.getenv("RENDER_HANDOVER_GRACE_SECONDS", "8")))
+    if handover_grace:
+        print(f"⏳ Render polling handover grace: {handover_grace:.0f}s")
+        time.sleep(handover_grace)
+
+    # Only one Render instance may call Telegram getUpdates at a time.
+    acquire_single_poller_lock()
+
+    # V16 result tracking runs only on the active Telegram instance.
     start_result_tracker(interval_seconds=3600)
 
     # Telegram can be slow or intermittently blocked on some networks.

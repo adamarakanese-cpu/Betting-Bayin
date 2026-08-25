@@ -676,7 +676,7 @@ def format_v13_tip(result):
 
     if not tip:
         return (
-            "👑 BETTING BAYIN PRE-BET\n\n"
+            "👑 SHWE OHH PRE-BET\n\n"
             f"⚽ {home} vs {away}\n"
             f"🏆 {league}\n\n"
             "📸 Market နဲ့ Odds မြင်ရအောင် screenshot ပြန်ပို့ပါ။"
@@ -707,7 +707,7 @@ def format_v13_tip(result):
             odds_line = f"💰 Odds: {odds:.3f}\n"
 
     return (
-        "👑 BETTING BAYIN PRE-BET\n\n"
+        "👑 SHWE OHH PRE-BET\n\n"
         f"⚽ {home} vs {away}\n"
         f"🏆 {league}\n"
         "🎫 Pre Bet\n\n"
