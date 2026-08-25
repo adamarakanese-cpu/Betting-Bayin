@@ -1,9 +1,9 @@
 import math
 from deepseek_verifier import verify_model_context
 from performance_engine import apply_performance_feedback
-from intelligence_engine import apply_contextual_learning, no_bet_gate
+from intelligence_engine import apply_contextual_learning, apply_selection_intelligence, no_bet_gate
 
-V13_VERSION = "V16.2"
+V13_VERSION = "V19.2"
 
 
 def _f(v):
@@ -575,6 +575,9 @@ def build_v13_decision(extracted, research, probability, calibration):
     # correction. It is bounded and does nothing until enough settled picks exist.
     ranked = apply_performance_feedback(ranked)
     ranked = apply_contextual_learning(ranked, extracted, research)
+    # V19.2: latency-free final ordering. Mandatory-tip behavior is preserved;
+    # this only improves which available candidate wins the comparison.
+    ranked = apply_selection_intelligence(ranked, extracted, research, audit)
     if not ranked:
         return {
             "version": V13_VERSION, "status": "NO_SUPPORTED_VISIBLE_MARKET", "tip": None,
@@ -601,7 +604,7 @@ def build_v13_decision(extracted, research, probability, calibration):
         bonus = 0.070 if not c.get("odds_estimated") else 0.0
         if not c.get("odds_estimated") and c.get("expected_value", 0) > 0:
             bonus += min(0.035, c["expected_value"] * 0.10)
-        return c["ranking_score"] + bonus
+        return c.get("selection_intelligence_score", c["ranking_score"]) + bonus
 
     visible_pool = [c for c in pool if not c.get("odds_estimated")]
     hidden_pool = [c for c in pool if c.get("odds_estimated")]

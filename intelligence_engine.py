@@ -95,3 +95,60 @@ def no_bet_gate(best, extracted, research, audit=None):
     if not best:
         return ["No supported market could be extracted"]
     return []
+
+
+def apply_selection_intelligence(candidates, extracted=None, research=None, audit=None):
+    """V19.2 final-selector refinement without adding network latency.
+
+    Keeps the mandatory-tip policy, but makes the *relative* ordering more robust:
+    real screenshot prices, model support, probability, evidence, price usability and
+    contradiction risk are combined into one bounded selector score. No candidate is
+    rejected solely for being weak; the best available option is still returned.
+    """
+    audit = audit or {}
+    out = []
+    for original in candidates or []:
+        c = dict(original)
+        p = _clamp(c.get("model_probability") or 0.5, 0.01, 0.99)
+        evidence = _clamp(c.get("evidence_confidence") or 0.0, 0.0, 1.0)
+        odds = float(c.get("odds") or 0.0)
+        ev = float(c.get("expected_value") or 0.0)
+        edge = float(c.get("edge") or 0.0)
+        risk = max(0.0, float(c.get("risk_penalty") or 0.0))
+
+        score = float(c.get("ranking_score") or 0.0)
+        # Accuracy-first: probability/evidence matter more than speculative EV.
+        score += (p - 0.50) * 0.22
+        score += (evidence - 0.50) * 0.08
+        score += max(-0.02, min(0.025, ev * 0.05))
+        score += max(-0.015, min(0.020, edge * 0.06))
+        score -= min(0.06, risk * 0.08)
+
+        # Prefer bookmaker-visible, natively model-supported choices.
+        if not c.get("odds_estimated"):
+            score += 0.035
+        else:
+            score -= 0.020
+        if c.get("model_supported"):
+            score += 0.018
+        else:
+            score -= 0.025
+
+        # Very short prices can look artificially safe while adding little value.
+        # Penalize rather than ban them, preserving mandatory best-tip behavior.
+        if odds and odds < 1.08:
+            score -= 0.070
+        elif odds and odds < 1.15:
+            score -= 0.025
+        elif 1.20 <= odds <= 2.20:
+            score += 0.012
+        elif odds >= 4.0:
+            score -= 0.035
+
+        if audit.get("contradiction"):
+            score -= 0.020 + (1.0 - evidence) * 0.025
+
+        c["selection_intelligence_score"] = score
+        c["selection_intelligence_version"] = "V19.2"
+        out.append(c)
+    return sorted(out, key=lambda x: float(x.get("selection_intelligence_score") or -999), reverse=True)

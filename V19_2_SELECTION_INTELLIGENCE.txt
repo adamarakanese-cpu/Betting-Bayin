@@ -1,0 +1,9 @@
+SHWE OHH V19.2 — TIP SELECTION INTELLIGENCE
+
+- Keeps mandatory best-tip policy: no quality-based NO BET gate added.
+- Adds no network/API calls, so V18 fast vision path is unchanged.
+- Re-ranks available candidates accuracy-first using model probability + evidence.
+- Prefers real screenshot prices and natively model-supported markets.
+- Penalizes ultra-short odds and high long-shot risk instead of banning them.
+- Preserves historical performance feedback + league/team contextual learning.
+- DeepSeek contradiction lowers relative selector score but does not suppress a tip.
