@@ -38,7 +38,7 @@ from v13_engine import format_v13_tip
 
 
 # =========================================================
-# BETTING BAYIN V13.6
+# BETTING BAYIN V13.7
 # TELEGRAM BOT + FULL AI PIPELINE + RENDER HEALTH SERVER
 # =========================================================
 
@@ -278,8 +278,8 @@ def _market_display(selection, home_team, away_team):
         "w2": f"1X2 - {away_team}",
         "2": f"1X2 - {away_team}",
         "1x": f"Double Chance - 1X ({home_team} or Draw)",
-        "x2": f"Double Chance - X2 (Draw or {away_team})",
-        "2x": f"Double Chance - X2 (Draw or {away_team})",
+        "x2": f"Double Chance - 2X (Draw or {away_team})",
+        "2x": f"Double Chance - 2X (Draw or {away_team})",
         "12": "Double Chance - 12 (No Draw)",
         "yes": "Both Teams To Score - YES",
         "no": "Both Teams To Score - NO",
@@ -470,7 +470,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if is_admin(user.id):
         await update.message.reply_text(
-            "👑 BETTING BAYIN V13.6\n\n"
+            "👑 BETTING BAYIN V13.7\n\n"
             "🛡 ADMIN MODE\n\n"
             f"Admin ID: {user.id}\n\n"
             "COMMANDS\n\n"
@@ -489,7 +489,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if active:
         expiry_text = expires_at.strftime("%d-%m-%Y %H:%M UTC")
         await update.message.reply_text(
-            "👑 BETTING BAYIN V13.6\n\n"
+            "👑 BETTING BAYIN V13.7\n\n"
             f"မင်္ဂလာပါ {user.first_name}!\n\n"
             "🟢 SUBSCRIPTION ACTIVE\n\n"
             f"⏳ Expire: {expiry_text}\n\n"
@@ -753,7 +753,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👑 BETTING BAYIN V13.6\n\n"
+        "👑 BETTING BAYIN V13.7\n\n"
         "📸 1XBET Pre-Bet Screenshot ပို့ပေးပါ.\n\n"
         "🔐 Subscription စစ်ရန်:\n/subscription"
     )
@@ -764,7 +764,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 def main():
-    print("👑 BETTING BAYIN V13.6")
+    print("👑 BETTING BAYIN V13.7")
     print("🟢 Starting...")
 
     if ADMIN_USER_ID:

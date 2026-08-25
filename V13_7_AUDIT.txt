@@ -1,0 +1,16 @@
+BETTING BAYIN V13.7 AUDIT
+
+Fixed after full V13.6.1 review:
+- Screenshot-visible odds are authoritative for the exact market/selection.
+- Synthetic candidates are deduplicated against visible markets before ranking.
+- Double Chance customer naming is standardized to 1X / 12 / 2X only.
+- X2/X1 are accepted only as internal OCR aliases; never shown to customers.
+- Hidden model-supported markets may still compete when absent from screenshot.
+- Hidden prices are explicitly Estimated Odds and are not credited fake EV.
+- Estimated odds use reduced display precision so they do not look like live quotes.
+- Long-shot filtering keeps win probability ahead of high-odds attraction.
+- Version labels synchronized to V13.7 in active bot/pipeline/output paths.
+- Added regression tests for the exact Iran U20/Iraq U20 Double Chance failure mode.
+
+Important modeling limitation:
+No prediction model can guarantee 99% accuracy. Estimated odds for markets not shown in the screenshot are model-derived approximations, not bookmaker quotes.

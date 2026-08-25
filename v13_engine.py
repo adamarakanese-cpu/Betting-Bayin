@@ -1,7 +1,7 @@
 import math
 from deepseek_verifier import verify_model_context
 
-V13_VERSION = "V13.6"
+V13_VERSION = "V13.7"
 
 
 def _f(v):
@@ -14,6 +14,42 @@ def _f(v):
 
 def _norm(s):
     return str(s or "").strip().lower().replace("−", "-")
+
+
+def _canonical_selection(market_name, selection):
+    """Normalize bookmaker aliases so visible prices always beat estimates."""
+    m = _norm(market_name)
+    s = _norm(selection).replace(" ", "")
+    if "doublechance" in m.replace(" ", ""):
+        if s in {"x2", "2x"}:
+            return "2x"
+        if s in {"1x", "x1"}:
+            return "1x"
+        if s in {"12", "21"}:
+            return "12"
+    if m == "1x2":
+        aliases = {"1": "w1", "home": "w1", "homewin": "w1",
+                   "x": "draw", "2": "w2", "away": "w2", "awaywin": "w2"}
+        return aliases.get(s, s)
+    return s
+
+
+def _market_key(market_name, selection):
+    # Canonical key is for matching only. Customer display follows 1X / 12 / 2X.
+    return (_norm(market_name), _canonical_selection(market_name, selection))
+
+
+def _display_selection(market_name, selection):
+    raw = str(selection or "").strip()
+    if "doublechance" in _norm(market_name).replace(" ", ""):
+        canon = _canonical_selection(market_name, selection)
+        if canon == "1x":
+            return "1X"
+        if canon == "12":
+            return "12"
+        if canon == "2x":
+            return "2X"
+    return raw
 
 
 def _clamp(v, lo=0.0, hi=1.0):
@@ -146,7 +182,7 @@ def rank_visible_markets(extracted, calibration, reliability, deepseek_audit=Non
             )
             candidates.append({
                 "market_name": name,
-                "selection": str(item.get("selection") or ""),
+                "selection": _display_selection(name, item.get("selection")),
                 "odds": odds,
                 "raw_model_probability": raw_model_p,
                 "model_probability": robust_p,
@@ -195,7 +231,7 @@ def _hidden_model_candidates(extracted, probability, calibration, reliability, d
             ("1X2", "W2", a, 0.07),
             ("Double Chance", "1X", h + d, -0.05),
             ("Double Chance", "12", h + a, -0.03),
-            ("Double Chance", "X2", d + a, -0.05),
+            ("Double Chance", "2X", d + a, -0.05),
         ]
 
     for line in (1.5, 2.5, 3.5):
@@ -234,11 +270,11 @@ def _hidden_model_candidates(extracted, probability, calibration, reliability, d
     for market in extracted.get("markets", []) or []:
         mn = _norm(market.get("market_name"))
         for item in market.get("selections", []) or []:
-            visible_pairs.add((mn, _norm(item.get("selection"))))
+            visible_pairs.add(_market_key(market.get("market_name"), item.get("selection")))
 
     for market_name, selection, p_raw, base_risk in specs:
         p = _clamp(p_raw, 0.01, 0.99)
-        if (_norm(market_name), _norm(selection)) in visible_pairs:
+        if _market_key(market_name, selection) in visible_pairs:
             continue
         est_odds = _estimated_bookmaker_odds(p, 0.05 if market_name == "1X2" else 0.04)
         risk = base_risk + comp_penalty
@@ -278,12 +314,23 @@ def _hidden_model_candidates(extracted, probability, calibration, reliability, d
 
 def rank_all_markets(extracted, probability, calibration, reliability, deepseek_audit=None):
     visible = rank_visible_markets(extracted, calibration, reliability, deepseek_audit)
+    visible_by_key = {}
     for c in visible:
         c["odds_estimated"] = False
         c["source"] = "screenshot"
+        visible_by_key[_market_key(c.get("market_name"), c.get("selection"))] = c
+
     hidden = _hidden_model_candidates(
         extracted, probability, calibration, reliability, deepseek_audit
     )
+
+    # Absolute rule: if the screenshot contains the same market/selection under
+    # an alias (e.g. 2X vs X2), never allow a synthetic candidate or estimated
+    # price to represent it. The screenshot quote is the source of truth.
+    hidden = [
+        c for c in hidden
+        if _market_key(c.get("market_name"), c.get("selection")) not in visible_by_key
+    ]
     return sorted(visible + hidden, key=lambda x: x["ranking_score"], reverse=True)
 
 def _tip_grade(candidate):
@@ -368,7 +415,7 @@ def build_v13_decision(extracted, research, probability, calibration):
 
 
 def format_v13_tip(result):
-    """Customer-facing V13.5 report: match data + one actionable tip only."""
+    """Customer-facing report: match data + one actionable tip only."""
     match = result.get("match", {}) or {}
     extracted = result.get("extracted_data", {}) or {}
     v13 = result.get("v13", {}) or {}
@@ -382,25 +429,26 @@ def format_v13_tip(result):
 
     if not tip:
         return (
-            "👑 BETTING BAYIN V13.6\n\n"
+            f"👑 BETTING BAYIN {V13_VERSION}\n\n"
             f"⚽ {home} vs {away}\n"
             f"🏆 {league}\n\n"
             "📸 Market နဲ့ Odds မြင်ရအောင် screenshot ပြန်ပို့ပါ။"
         )
 
     market = str(tip.get("market_name") or "Market").strip()
-    selection = str(tip.get("selection") or "").strip()
+    selection = _display_selection(market, tip.get("selection"))
     market_text = f"{market} — {selection}" if selection else market
     odds = float(tip.get("odds") or 0.0)
     probability = float(tip.get("model_probability") or 0.0) * 100.0
     odds_label = "Estimated Odds" if tip.get("odds_estimated") else "Odds"
+    odds_text = f"{odds:.2f}" if tip.get("odds_estimated") else f"{odds:.3f}"
 
     return (
-        "👑 BETTING BAYIN V13.6\n\n"
+        f"👑 BETTING BAYIN {V13_VERSION}\n\n"
         f"⚽ {home} vs {away}\n"
         f"🏆 {league}\n"
         f"🎫 {bet_type}\n\n"
         f"🎯 TIP: {market_text}\n"
-        f"💰 {odds_label}: {odds:.3f}\n"
+        f"💰 {odds_label}: {odds_text}\n"
         f"📊 Win Chance: {probability:.0f}%"
     )

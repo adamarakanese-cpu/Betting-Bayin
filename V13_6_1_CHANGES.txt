@@ -1,0 +1,6 @@
+BETTING BAYIN V13.6.1 HOTFIX
+
+- Screenshot odds are authoritative for any visible market/selection.
+- Canonicalizes Double Chance aliases X2/2X, 1X/X1, 12/21.
+- Synthetic candidates cannot overwrite or duplicate a visible equivalent.
+- Estimated Odds is used only when that exact market/selection is absent from the screenshot.
