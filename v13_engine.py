@@ -3,7 +3,7 @@ from deepseek_verifier import verify_model_context
 from performance_engine import apply_performance_feedback
 from intelligence_engine import apply_contextual_learning, apply_selection_intelligence, no_bet_gate
 
-V13_VERSION = "V19.2"
+V13_VERSION = "V19.3"
 
 
 def _f(v):
@@ -575,8 +575,8 @@ def build_v13_decision(extracted, research, probability, calibration):
     # correction. It is bounded and does nothing until enough settled picks exist.
     ranked = apply_performance_feedback(ranked)
     ranked = apply_contextual_learning(ranked, extracted, research)
-    # V19.2: latency-free final ordering. Mandatory-tip behavior is preserved;
-    # this only improves which available candidate wins the comparison.
+    # V19.3: accuracy-first latency-free final ordering. Mandatory-tip behavior
+    # is preserved; weak candidates are demoted, never converted into NO BET.
     ranked = apply_selection_intelligence(ranked, extracted, research, audit)
     if not ranked:
         return {
@@ -589,7 +589,10 @@ def build_v13_decision(extracted, research, probability, calibration):
     # Model-only hidden markets remain available, but cannot casually displace a
     # practical real-price selection. This fixes repeated synthetic Over 0.5 tips
     # and makes multi-page bookmaker screenshots actually useful.
-    pool = [c for c in ranked if c.get("model_supported")] or ranked
+    # Do not throw away safer screenshot-visible choices merely because the
+    # statistical model lacks a native formula for that market. V19.3 ranks
+    # support quality as a bonus/penalty instead of a hard pre-filter.
+    pool = list(ranked)
 
     safer = [c for c in pool if c["model_probability"] >= 0.55]
     if safer:

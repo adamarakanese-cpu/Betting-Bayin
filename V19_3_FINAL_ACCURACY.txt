@@ -1,0 +1,9 @@
+SHWE OHH V19.3 FINAL ACCURACY
+
+- Mandatory best tip remains enabled: no NO BET quality rejection.
+- Probability/evidence dominate final selection; EV/edge are bounded tie-breakers.
+- Weak <55% candidates receive escalating penalties.
+- Real screenshot odds preferred; estimated odds penalized.
+- Unsupported markets are no longer hard-filtered out before safety comparison.
+- Ultra-short and long-shot prices are penalized, not banned.
+- No new API/network calls; V18 speed path unchanged.

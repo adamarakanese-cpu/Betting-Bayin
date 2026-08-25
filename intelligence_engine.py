@@ -98,12 +98,11 @@ def no_bet_gate(best, extracted, research, audit=None):
 
 
 def apply_selection_intelligence(candidates, extracted=None, research=None, audit=None):
-    """V19.2 final-selector refinement without adding network latency.
+    """V19.3 accuracy-first mandatory selector (no extra network latency).
 
-    Keeps the mandatory-tip policy, but makes the *relative* ordering more robust:
-    real screenshot prices, model support, probability, evidence, price usability and
-    contradiction risk are combined into one bounded selector score. No candidate is
-    rejected solely for being weak; the best available option is still returned.
+    Probability and evidence dominate. EV/edge are tie-breakers, real screenshot
+    prices are preferred, and unsupported/long-shot/ultra-short choices are
+    penalized rather than banned so a tip is still always produced.
     """
     audit = audit or {}
     out = []
@@ -116,39 +115,45 @@ def apply_selection_intelligence(candidates, extracted=None, research=None, audi
         edge = float(c.get("edge") or 0.0)
         risk = max(0.0, float(c.get("risk_penalty") or 0.0))
 
-        score = float(c.get("ranking_score") or 0.0)
-        # Accuracy-first: probability/evidence matter more than speculative EV.
-        score += (p - 0.50) * 0.22
-        score += (evidence - 0.50) * 0.08
-        score += max(-0.02, min(0.025, ev * 0.05))
-        score += max(-0.015, min(0.020, edge * 0.06))
-        score -= min(0.06, risk * 0.08)
+        # Accuracy-first composite.  A 10-point probability advantage must be
+        # difficult for noisy EV to overturn.
+        score = p * 0.72 + evidence * 0.14
+        score += max(-0.018, min(0.022, ev * 0.035))
+        score += max(-0.012, min(0.015, edge * 0.045))
+        score -= min(0.085, risk * 0.10)
 
-        # Prefer bookmaker-visible, natively model-supported choices.
-        if not c.get("odds_estimated"):
-            score += 0.035
-        else:
-            score -= 0.020
-        if c.get("model_supported"):
-            score += 0.018
-        else:
-            score -= 0.025
+        # Source/model quality bonuses are deliberately smaller than probability.
+        score += 0.035 if not c.get("odds_estimated") else -0.025
+        score += 0.020 if c.get("model_supported") else -0.018
 
-        # Very short prices can look artificially safe while adding little value.
-        # Penalize rather than ban them, preserving mandatory best-tip behavior.
-        if odds and odds < 1.08:
-            score -= 0.070
-        elif odds and odds < 1.15:
-            score -= 0.025
-        elif 1.20 <= odds <= 2.20:
+        # Strongly demote genuinely weak candidates, without creating NO BET.
+        if p < 0.45:
+            score -= 0.120
+        elif p < 0.50:
+            score -= 0.080
+        elif p < 0.55:
+            score -= 0.045
+        elif p >= 0.70:
+            score += 0.025
+        elif p >= 0.62:
             score += 0.012
-        elif odds >= 4.0:
+
+        # Price usability: avoid both fake-safety ultra-short odds and long-shot traps.
+        if odds and odds < 1.08:
+            score -= 0.120
+        elif odds and odds < 1.15:
             score -= 0.035
+        elif 1.20 <= odds <= 2.20:
+            score += 0.018
+        elif odds >= 4.0:
+            score -= 0.060
+        elif odds >= 3.0:
+            score -= 0.025
 
         if audit.get("contradiction"):
-            score -= 0.020 + (1.0 - evidence) * 0.025
+            score -= 0.025 + (1.0 - evidence) * 0.030
 
         c["selection_intelligence_score"] = score
-        c["selection_intelligence_version"] = "V19.2"
+        c["selection_intelligence_version"] = "V19.3"
         out.append(c)
     return sorted(out, key=lambda x: float(x.get("selection_intelligence_score") or -999), reverse=True)
