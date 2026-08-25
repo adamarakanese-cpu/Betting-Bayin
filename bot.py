@@ -56,7 +56,7 @@ from match_reconcile import reconcile_album_extractions
 
 
 # =========================================================
-# BETTING BAYIN V18.0 SPEED ROUTER
+# SHWE OHH V18.0 SPEED ROUTER
 # TELEGRAM BOT + FULL AI PIPELINE + RENDER HEALTH SERVER
 # =========================================================
 
@@ -69,7 +69,8 @@ VISION_PROVIDER = os.getenv("VISION_PROVIDER", "auto").strip().lower()
 OPENAI_VISION_TIMEOUT = float(os.getenv("OPENAI_VISION_TIMEOUT", "35"))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_USER_ID_RAW = os.getenv("ADMIN_USER_ID", "").strip()
-ADMIN_USERNAME_RAW = os.getenv("ADMIN_USERNAME", "").strip()
+ADMIN_USER_IDS_RAW = os.getenv("ADMIN_USER_IDS", "").strip()
+ADMIN_USERNAME_RAW = os.getenv("ADMIN_USERNAME", "shweohh_admin").strip()
 VISION_MODEL = os.getenv("VISION_MODEL", "qwen/qwen3.6-27b")
 PORT = int(os.getenv("PORT", "10000"))
 
@@ -79,13 +80,20 @@ if not GROQ_API_KEY:
 if not TELEGRAM_BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN မတွေ့ပါ")
 
-ADMIN_USER_ID = (
-    int(ADMIN_USER_ID_RAW)
-    if ADMIN_USER_ID_RAW.isdigit()
-    else None
-)
+# Dual-admin support. Keep the original owner and the Shwe Ohh admin account.
+DEFAULT_ADMIN_USER_IDS = {1051898916, 7806672181}
+ADMIN_USER_IDS = set(DEFAULT_ADMIN_USER_IDS)
+if ADMIN_USER_ID_RAW.isdigit():
+    ADMIN_USER_IDS.add(int(ADMIN_USER_ID_RAW))
+for raw_id in ADMIN_USER_IDS_RAW.replace(";", ",").split(","):
+    raw_id = raw_id.strip()
+    if raw_id.isdigit():
+        ADMIN_USER_IDS.add(int(raw_id))
 
-ADMIN_USERNAME = ADMIN_USERNAME_RAW.lstrip("@").strip()
+# Backward-compatible single value for older code/logging.
+ADMIN_USER_ID = int(ADMIN_USER_ID_RAW) if ADMIN_USER_ID_RAW.isdigit() else None
+
+ADMIN_USERNAME = ADMIN_USERNAME_RAW.lstrip("@").strip() or "shweohh_admin"
 ADMIN_CONTACT = f"@{ADMIN_USERNAME}" if ADMIN_USERNAME else "Admin"
 
 groq_client = Groq(api_key=GROQ_API_KEY)
@@ -93,7 +101,7 @@ init_database()
 
 
 VISION_SYSTEM_PROMPT = """
-You are the vision extraction engine for Betting Bayin.
+You are the vision extraction engine for Shwe Ohh.
 
 Your ONLY job is to accurately read football betting screenshots.
 
@@ -159,7 +167,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         if self.path in ("/", "/health"):
             payload = {
                 "ok": True,
-                "service": "Betting Bayin",
+                "service": "Shwe Ohh",
                 "version": "V18.0 SPEED ROUTER",
                 "telegram_polling": True,
             }
@@ -180,7 +188,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         if self.path in ("/", "/health"):
             body = json.dumps({
                 "ok": True,
-                "service": "Betting Bayin",
+                "service": "Shwe Ohh",
                 "version": "V18.0 SPEED ROUTER",
                 "telegram_polling": True,
             }).encode("utf-8")
@@ -217,10 +225,10 @@ def start_health_server():
 # =========================================================
 
 def is_admin(user_id):
-    return (
-        ADMIN_USER_ID is not None
-        and user_id == ADMIN_USER_ID
-    )
+    try:
+        return int(user_id) in ADMIN_USER_IDS
+    except (TypeError, ValueError):
+        return False
 
 
 def image_to_data_url(image_path):
@@ -608,7 +616,7 @@ def build_always_tip_report(result, extracted):
 
     if chosen is None:
         return (
-            "👑 BETTING BAYIN\n\n"
+            "👑 SHWE OHH\n\n"
             "⚠️ Screenshot ထဲက odds/market ကို ဖတ်မရသေးပါ။\n"
             "Market နဲ့ odds မြင်ရအောင် screenshot ကို ပြန်ပို့ပါ။"
         )
@@ -662,7 +670,7 @@ def build_always_tip_report(result, extracted):
     )
 
     return (
-        "👑 BETTING BAYIN\n\n"
+        "👑 SHWE OHH\n\n"
         "🎯 BEST AVAILABLE TIP\n\n"
         f"⚽ ပွဲစဉ် (Match): {home_team} vs {away_team}\n"
         f"🏆 League: {competition}\n"
@@ -730,7 +738,7 @@ def remaining_subscription_text(expires_at):
 
 async def show_start_ready(update: Update):
     await update.message.reply_text(
-        "👑 BETTING BAYIN PRE-BET\n\n"
+        "👑 SHWE OHH PRE-BET\n\n"
         "📸 1XBET Pre-Bet Screenshot ပို့ပါ။\n"
         "🎯 Single Tip ကို အလိုအလျောက်ရွေးပေးပါမယ်။\n\n"
         "🔥 မောင်းတွဲချင်ရင် Screenshot တွေ တစ်ပွဲချင်းပို့ပြီး ၅ပွဲပြည့်တဲ့အခါ\n"
@@ -771,7 +779,7 @@ async def show_balance(update: Update, user):
 
 async def show_subscription_purchase(update: Update, user):
     await update.message.reply_text(
-        "💳 BETTING BAYIN SUBSCRIPTION\n\n"
+        "💳 SHWE OHH SUBSCRIPTION\n\n"
         "📦 WEEKLY PLAN\n"
         "7 Days — 50,000 MMK\n\n"
         "🆔 YOUR USER ID\n"
@@ -793,7 +801,7 @@ async def show_admin_contact(update: Update):
 
 async def show_help(update: Update):
     await update.message.reply_text(
-        "📖 BETTING BAYIN အသုံးပြုနည်း\n\n"
+        "📖 SHWE OHH အသုံးပြုနည်း\n\n"
         "1️⃣ ▶️ Start ကိုနှိပ်ပါ။\n"
         "2️⃣ 1XBET Pre-Bet Match Screenshot တစ်ပုံပို့ပါ။\n"
         "3️⃣ Bot က အကောင်းဆုံး Single Tip ကို ပြန်ပေးပါမယ်။\n"
@@ -827,7 +835,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if is_admin(user.id):
         await update.message.reply_text(
-            "👑 BETTING BAYIN PRE-BET\n\n"
+            "👑 SHWE OHH PRE-BET\n\n"
             "🛡 ADMIN MODE\n\n"
             f"Admin ID: {user.id}\n\n"
             "COMMANDS\n"
@@ -850,7 +858,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if active:
         expiry_text = expires_at.strftime("%d-%m-%Y %H:%M UTC")
         await update.message.reply_text(
-            "👑 BETTING BAYIN PRE-BET\n\n"
+            "👑 SHWE OHH PRE-BET\n\n"
             f"မင်္ဂလာပါ {user.first_name}!\n\n"
             "🟢 SUBSCRIPTION ACTIVE\n"
             f"⏳ လက်ကျန်: {remaining_subscription_text(expires_at)}\n"
@@ -862,7 +870,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     safe_first_name = html.escape(user.first_name or "User")
     await update.message.reply_text(
-        "👑 BETTING BAYIN\n\n"
+        "👑 SHWE OHH\n\n"
         f"မင်္ဂလာပါ {safe_first_name}!\n\n"
         "🔒 Subscription မရှိသေးပါ။\n\n"
         "💳 WEEKLY PLAN\n"
@@ -1019,7 +1027,7 @@ async def performance_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     summary = await asyncio.to_thread(get_performance_summary)
     counts = await asyncio.to_thread(get_tracking_counts)
     await update.message.reply_text(
-        "📊 BETTING BAYIN PERFORMANCE\n\n"
+        "📊 SHWE OHH PERFORMANCE\n\n"
         f"✅ Settled: {summary['total_settled']}\n"
         f"🟢 Win: {summary['wins']}\n"
         f"🔴 Loss: {summary['losses']}\n"
@@ -1137,7 +1145,7 @@ async def _process_extracted_match(update, context, user, extracted):
     match_type = str(extracted.get("match_type") or "").strip().lower()
     if bool(live.get("is_live")) or "live" in match_type:
         await update.message.reply_text(
-            "⚠️ BETTING BAYIN PRE-BET ONLY\n\n"
+            "⚠️ SHWE OHH PRE-BET ONLY\n\n"
             "Live match screenshot မဟုတ်ဘဲ ပွဲမစခင် Pre-Bet screenshot ပို့ပေးပါ။"
         )
         return
@@ -1157,7 +1165,7 @@ async def _process_extracted_match(update, context, user, extracted):
     for index in range(0, len(reply), chunk_size):
         await update.message.reply_text(reply[index:index + chunk_size])
 
-    print("\n========== BETTING BAYIN RESULT ==========")
+    print("\n========== SHWE OHH RESULT ==========")
     print(
         f"Match: {result.get('match', {}).get('home_team')} "
         f"vs {result.get('match', {}).get('away_team')}"
@@ -1251,7 +1259,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not active:
             await update.message.reply_text(
                 "🔒 ACCESS DENIED\n\n"
-                "Betting Bayin Subscription မရှိပါ သို့မဟုတ် သက်တမ်းကုန်နေပါပြီ.\n\n"
+                "Shwe Ohh Subscription မရှိပါ သို့မဟုတ် သက်တမ်းကုန်နေပါပြီ.\n\n"
                 "🆔 YOUR USER ID\n"
                 f"{user.id}\n\n"
                 "💳 7 Days — 50,000 MMK\n\n"
@@ -1363,7 +1371,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "👑 BETTING BAYIN PRE-BET\n\n"
+        "👑 SHWE OHH PRE-BET\n\n"
         "အောက်က Menu ကနေ ရွေးချယ်နိုင်ပါတယ်။\n"
         "📸 Tip ယူရန် Pre-Bet Screenshot ကို တိုက်ရိုက်ပို့နိုင်ပါတယ်။",
         reply_markup=main_menu_keyboard(),
@@ -1375,14 +1383,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 def main():
-    print("👑 BETTING BAYIN V18 SPEED ROUTER")
+    print("👑 SHWE OHH V18 SPEED ROUTER")
     print(f"⚡ Vision provider: {VISION_PROVIDER}; OpenAI configured: {bool(OPENAI_API_KEY)}")
     print("🟢 Starting...")
 
-    if ADMIN_USER_ID:
-        print(f"🛡 Admin ID loaded: {ADMIN_USER_ID}")
-    else:
-        print("⚠️ ADMIN_USER_ID မသတ်မှတ်ရသေးပါ.")
+    print(f"🛡 Admin IDs loaded: {sorted(ADMIN_USER_IDS)}")
+    print(f"📩 Public admin: {ADMIN_CONTACT}")
 
     # Render Web Service requires an open HTTP port.
     start_health_server()
@@ -1434,7 +1440,7 @@ def main():
         )
     )
 
-    print("✅ Betting Bayin ONLINE")
+    print("✅ Shwe Ohh ONLINE")
     print("📱 Open Telegram and send /start")
 
     try:
@@ -1446,7 +1452,7 @@ def main():
             timeout=30,
         )
     except KeyboardInterrupt:
-        print("\n🛑 Betting Bayin stopped by user.")
+        print("\n🛑 Shwe Ohh stopped by user.")
     except Exception as error:
         print("\n❌ Telegram polling stopped unexpectedly.")
         print(f"Error: {type(error).__name__}: {error}")
