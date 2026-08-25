@@ -1,0 +1,8 @@
+BETTING BAYIN V13.6
+
+- Universal model market pool: can recommend supported markets even when they are not visible in the screenshot.
+- Screenshot odds remain authoritative when visible.
+- Hidden-market prices are clearly labeled Estimated Odds and derived conservatively from model fair probability; they are not claimed as live bookmaker quotes.
+- Added 1X2, Double Chance, BTTS, Totals 1.5/2.5/3.5, team-to-score 0.5, and clean-sheet model candidates.
+- Safety-first ranking prevents low-probability longshots from winning simply due to noisy EV.
+- Customer output remains concise: match, league, bet type, tip, odds, win chance.

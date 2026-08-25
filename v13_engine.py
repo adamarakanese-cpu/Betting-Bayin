@@ -1,7 +1,7 @@
 import math
 from deepseek_verifier import verify_model_context
 
-V13_VERSION = "V13.5"
+V13_VERSION = "V13.6"
 
 
 def _f(v):
@@ -162,6 +162,130 @@ def rank_visible_markets(extracted, calibration, reliability, deepseek_audit=Non
     return sorted(candidates, key=lambda x: x["ranking_score"], reverse=True)
 
 
+
+def _estimated_bookmaker_odds(probability, margin=0.045):
+    """Conservative estimated offered odds for model-only markets.
+
+    These are NOT live bookmaker prices. We shade model fair odds by a modest
+    bookmaker margin so the customer sees a realistic estimate rather than a
+    fabricated exact quote.
+    """
+    p = _clamp(probability, 0.01, 0.99)
+    offered = 1.0 / min(0.995, p * (1.0 + margin))
+    return max(1.01, round(offered, 3))
+
+
+def _hidden_model_candidates(extracted, probability, calibration, reliability, deepseek_audit=None):
+    """Create model-derived candidates even when a market is not visible in SS."""
+    evidence = _evidence_confidence(reliability, deepseek_audit or {})
+    comp_penalty = _competition_penalty(extracted)
+    out = []
+
+    one = (calibration.get("one_x_two", {}) or {}).get("calibrated", {}) or {}
+    binary = calibration.get("binary_markets", {}) or {}
+    totals = binary.get("totals", {}) or {}
+    btts = binary.get("btts", {}) or {}
+
+    specs = []
+    h, d, a = one.get("home_win"), one.get("draw"), one.get("away_win")
+    if None not in (h, d, a):
+        specs += [
+            ("1X2", "W1", h, 0.07),
+            ("1X2", "Draw", d, 0.10),
+            ("1X2", "W2", a, 0.07),
+            ("Double Chance", "1X", h + d, -0.05),
+            ("Double Chance", "12", h + a, -0.03),
+            ("Double Chance", "X2", d + a, -0.05),
+        ]
+
+    for line in (1.5, 2.5, 3.5):
+        key = str(line).replace('.', '_')
+        op = totals.get(f"over_{key}")
+        un = totals.get(f"under_{key}")
+        if op is not None:
+            specs.append(("Total", f"Over ({line})", op, 0.00))
+        if un is not None:
+            specs.append(("Total", f"Under ({line})", un, 0.00))
+
+    if btts.get("yes") is not None:
+        specs.append(("Both Teams To Score", "Yes", btts.get("yes"), 0.00))
+    if btts.get("no") is not None:
+        specs.append(("Both Teams To Score", "No", btts.get("no"), 0.00))
+
+    # Team-to-score / clean-sheet markets are available from the Poisson model,
+    # though the calibration engine does not expose calibrated versions yet.
+    scoring = (probability or {}).get("team_scoring", {}) or {}
+    # Shrink raw model-only binary markets toward 50% according to reliability.
+    shrink_w = _clamp(0.25 + evidence * 0.65, 0.25, 0.90)
+    for market, sel, key in [
+        ("Home Team Total", "Over (0.5)", "home_to_score"),
+        ("Away Team Total", "Over (0.5)", "away_to_score"),
+        ("Home Clean Sheet", "Yes", "home_clean_sheet"),
+        ("Away Clean Sheet", "Yes", "away_clean_sheet"),
+    ]:
+        raw = _f(scoring.get(key))
+        if raw is not None:
+            robust = _clamp(raw * shrink_w + 0.50 * (1.0 - shrink_w), 0.01, 0.99)
+            specs.append((market, sel, robust, 0.01))
+
+    # Deduplicate against screenshot-visible exact market/selection pairs so an
+    # actual quoted price always wins over an estimate for the same selection.
+    visible_pairs = set()
+    for market in extracted.get("markets", []) or []:
+        mn = _norm(market.get("market_name"))
+        for item in market.get("selections", []) or []:
+            visible_pairs.add((mn, _norm(item.get("selection"))))
+
+    for market_name, selection, p_raw, base_risk in specs:
+        p = _clamp(p_raw, 0.01, 0.99)
+        if (_norm(market_name), _norm(selection)) in visible_pairs:
+            continue
+        est_odds = _estimated_bookmaker_odds(p, 0.05 if market_name == "1X2" else 0.04)
+        risk = base_risk + comp_penalty
+        if est_odds >= 4.0: risk += 0.14
+        elif est_odds >= 3.0: risk += 0.08
+        elif est_odds >= 2.25: risk += 0.03
+
+        # Hidden-market ranking is safety first: probability dominates. Because
+        # the odds are estimated, no fake edge/EV is credited to the score.
+        score = p * 0.68 + evidence * 0.18 - risk * 0.20
+        # Mild preference for usable prices; avoid selecting 1.02 unless nothing
+        # else is remotely close in win probability.
+        if 1.15 <= est_odds <= 2.20:
+            score += 0.035
+        elif est_odds < 1.10:
+            score -= 0.035
+
+        out.append({
+            "market_name": market_name,
+            "selection": selection,
+            "odds": est_odds,
+            "odds_estimated": True,
+            "raw_model_probability": p,
+            "model_probability": p,
+            "market_probability": None,
+            "edge": 0.0,
+            "expected_value": 0.0,
+            "risk_penalty": risk,
+            "ranking_score": score,
+            "evidence_confidence": evidence,
+            "market_anchor_weight": 0.0,
+            "model_supported": True,
+            "source": "model_estimate",
+        })
+    return out
+
+
+def rank_all_markets(extracted, probability, calibration, reliability, deepseek_audit=None):
+    visible = rank_visible_markets(extracted, calibration, reliability, deepseek_audit)
+    for c in visible:
+        c["odds_estimated"] = False
+        c["source"] = "screenshot"
+    hidden = _hidden_model_candidates(
+        extracted, probability, calibration, reliability, deepseek_audit
+    )
+    return sorted(visible + hidden, key=lambda x: x["ranking_score"], reverse=True)
+
 def _tip_grade(candidate):
     e = candidate["evidence_confidence"]
     p = candidate["model_probability"]
@@ -186,30 +310,38 @@ def build_v13_decision(extracted, research, probability, calibration):
     if reliability <= 0.0:
         reliability = float((probability.get("model_confidence", {}) or {}).get("score", 0.0) or 0.0)
 
-    ranked = rank_visible_markets(extracted, calibration, reliability, audit)
+    ranked = rank_all_markets(extracted, probability, calibration, reliability, audit)
     if not ranked:
         return {
             "version": V13_VERSION, "status": "NO_SUPPORTED_VISIBLE_MARKET", "tip": None,
             "ranked_candidates": [], "deepseek_audit": audit, "reliability": reliability,
-            "gate_reasons": ["Screenshot ထဲမှာ model ကတွက်နိုင်တဲ့ visible market မရှိသေးပါ။"],
+            "gate_reasons": ["Model ကတွက်နိုင်တဲ့ market မရှိသေးပါ။"],
         }
 
-    # V13.4: positive EV is preferred, but weak/sparse leagues are not automatically blocked.
-    positive = [c for c in ranked if c["expected_value"] > 0 and c["edge"] > 0]
-    pool = positive if positive else ranked
+    # V13.6 universal market selector. Actual screenshot prices and model-only
+    # markets compete in one pool. Probability/safety dominates; positive EV is
+    # a bonus only when we have a real screenshot price.
+    pool = [c for c in ranked if c.get("model_supported")] or ranked
 
-    # Prefer markets backed by the internal probability model, while keeping
-    # every readable visible market eligible as an always-tip fallback.
-    supported = [c for c in pool if c.get("model_supported")]
-    if supported:
-        pool = supported
+    # Prefer a genuinely likely outcome. If at least one candidate is >=55%,
+    # do not select a 30-40% longshot merely because its displayed odds are high.
+    safer = [c for c in pool if c["model_probability"] >= 0.55]
+    if safer:
+        pool = safer
 
-    # Avoid choosing a wild longshot just because its EV is noisy.
-    practical = [c for c in pool if 1.10 <= c["odds"] <= 3.25]
+    practical = [c for c in pool if 1.08 <= c["odds"] <= 3.50]
     if practical:
         pool = practical
 
-    best = max(pool, key=lambda c: c["ranking_score"])
+    # Reward real positive-EV screenshot markets without letting EV overpower
+    # win probability. Estimated-odds markets receive no EV bonus.
+    def final_score(c):
+        bonus = 0.0
+        if not c.get("odds_estimated") and c.get("expected_value", 0) > 0:
+            bonus = min(0.035, c["expected_value"] * 0.10)
+        return c["ranking_score"] + bonus
+
+    best = max(pool, key=final_score)
     grade = _tip_grade(best)
     mode = _tip_mode(best, audit)
 
@@ -250,7 +382,7 @@ def format_v13_tip(result):
 
     if not tip:
         return (
-            "👑 BETTING BAYIN V13.5\n\n"
+            "👑 BETTING BAYIN V13.6\n\n"
             f"⚽ {home} vs {away}\n"
             f"🏆 {league}\n\n"
             "📸 Market နဲ့ Odds မြင်ရအောင် screenshot ပြန်ပို့ပါ။"
@@ -261,13 +393,14 @@ def format_v13_tip(result):
     market_text = f"{market} — {selection}" if selection else market
     odds = float(tip.get("odds") or 0.0)
     probability = float(tip.get("model_probability") or 0.0) * 100.0
+    odds_label = "Estimated Odds" if tip.get("odds_estimated") else "Odds"
 
     return (
-        "👑 BETTING BAYIN V13.5\n\n"
+        "👑 BETTING BAYIN V13.6\n\n"
         f"⚽ {home} vs {away}\n"
         f"🏆 {league}\n"
         f"🎫 {bet_type}\n\n"
         f"🎯 TIP: {market_text}\n"
-        f"💰 Odds: {odds:.3f}\n"
+        f"💰 {odds_label}: {odds:.3f}\n"
         f"📊 Win Chance: {probability:.0f}%"
     )
