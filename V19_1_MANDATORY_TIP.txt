@@ -1,0 +1,8 @@
+BETTING BAYIN V19.1 — MANDATORY TIP CORRECTION
+
+- Speed path unchanged from V18.
+- Valid analyzable PRE-BET match => always return the best available ranked tip.
+- Removed confidence/value/evidence NO-BET rejection from the V19 intelligence layer.
+- Sparse data, contradictions, short prices and negative EV still affect ranking/confidence; they no longer suppress the final tip.
+- True input/extraction failure still asks for a clearer screenshot instead of inventing a market.
+- League/team learning remains bounded and sample-gated.

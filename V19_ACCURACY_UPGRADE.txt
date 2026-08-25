@@ -1,0 +1,9 @@
+BETTING BAYIN V19 ACCURACY UPGRADE
+- V18 speed/vision path intentionally unchanged.
+- Existing verified league/team knowledge store preserved.
+- Added sample-gated league/team performance memory from settled predictions.
+- Added bounded contextual probability correction (max +/-2.5%).
+- Existing market/family calibration preserved.
+- Mandatory best-available-tip policy: valid analyzable matches are never skipped for weak/conflicting/short-price conditions.
+- Actual screenshot odds remain the source of truth.
+- Existing result tracking/self-learning preserved.

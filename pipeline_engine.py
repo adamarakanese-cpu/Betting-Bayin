@@ -25,7 +25,7 @@ from knowledge_store import get_profile, save_research_knowledge
 # UNIFIED PIPELINE ENGINE
 # =========================================================
 
-PIPELINE_VERSION = "V17.0 FINAL PRE-BET"
+PIPELINE_VERSION = "V19.0 ACCURACY PRE-BET"
 
 
 def _required_match_fields(extracted_data):
@@ -122,6 +122,8 @@ def _run_models(market_analysis, research):
     # Dynamic league/team context: verified web aggregates when available,
     # otherwise conservative signals derived from verified recent results.
     strength["context_profile"] = build_match_context_profile(research)
+    # Expose the already-computed profile to downstream quality gates. No extra I/O.
+    research["context_profile"] = strength["context_profile"]
     probability = calculate_match_probabilities(strength)
     calibration = calibrate_probability_model(probability)
     value = calculate_market_value(

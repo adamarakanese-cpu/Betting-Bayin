@@ -1,6 +1,7 @@
 import math
 from deepseek_verifier import verify_model_context
 from performance_engine import apply_performance_feedback
+from intelligence_engine import apply_contextual_learning, no_bet_gate
 
 V13_VERSION = "V16.2"
 
@@ -573,6 +574,7 @@ def build_v13_decision(extracted, research, probability, calibration):
     # V16: verified historical outcomes may apply a small sample-gated calibration
     # correction. It is bounded and does nothing until enough settled picks exist.
     ranked = apply_performance_feedback(ranked)
+    ranked = apply_contextual_learning(ranked, extracted, research)
     if not ranked:
         return {
             "version": V13_VERSION, "status": "NO_SUPPORTED_VISIBLE_MARKET", "tip": None,
@@ -621,6 +623,15 @@ def build_v13_decision(extracted, research, probability, calibration):
                 best = best_hidden
     else:
         best = max(pool, key=final_score)
+    gate_reasons = no_bet_gate(best, extracted, research, audit)
+    if gate_reasons:
+        return {
+            "version": V13_VERSION, "status": "NO_BET", "tip": None,
+            "ranked_candidates": ranked[:10], "deepseek_audit": audit,
+            "reliability": reliability, "gate_reasons": gate_reasons,
+            "warnings": ["Quality gate rejected the available prices/markets"],
+        }
+
     grade = _tip_grade(best)
     mode = _tip_mode(best, audit)
 
