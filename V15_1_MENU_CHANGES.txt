@@ -1,0 +1,16 @@
+BETTING BAYIN V15.1 PRE-BET MENU
+
+UI-only release. Prediction and parlay engines are unchanged.
+
+Main reply keyboard:
+- Subscription ဝယ်ယူရန် (full width)
+- Start | လက်ကျန်စစ်ရန်
+- Admin နှင့်ပြောရန် | အသုံးပြုနည်း
+
+Behavior:
+- /start always shows persistent menu.
+- Subscription purchase shows 7 Days / 50,000 MMK, User ID, and Admin chat button.
+- Balance shows ACTIVE/INACTIVE, remaining time, and expiry.
+- Admin button opens Telegram Admin chat when ADMIN_USERNAME is configured.
+- Help explains Single Tip and recent-match Parlay workflow.
+- Natural-language parlay and all V15.0 betting logic preserved.

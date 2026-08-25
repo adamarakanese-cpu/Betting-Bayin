@@ -4,12 +4,13 @@ import json
 import tempfile
 import asyncio
 import threading
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from dotenv import load_dotenv
 from groq import Groq
 
-from telegram import Update
+from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.request import HTTPXRequest
 from telegram.ext import (
     Application,
@@ -41,7 +42,7 @@ from parlay_engine import build_best_parlay, format_parlay
 
 
 # =========================================================
-# BETTING BAYIN V15.0 FINAL PRE-BET
+# BETTING BAYIN V15.1 PRE-BET MENU
 # TELEGRAM BOT + FULL AI PIPELINE + RENDER HEALTH SERVER
 # =========================================================
 
@@ -138,7 +139,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             payload = {
                 "ok": True,
                 "service": "Betting Bayin",
-                "version": "V15.0 FINAL PRE-BET",
+                "version": "V15.1 PRE-BET MENU",
                 "telegram_polling": True,
             }
             body = json.dumps(payload).encode("utf-8")
@@ -159,7 +160,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             body = json.dumps({
                 "ok": True,
                 "service": "Betting Bayin",
-                "version": "V15.0 FINAL PRE-BET",
+                "version": "V15.1 PRE-BET MENU",
                 "telegram_polling": True,
             }).encode("utf-8")
             self.send_response(200)
@@ -451,6 +452,131 @@ def build_always_tip_report(result, extracted):
 
 
 # =========================================================
+# TELEGRAM MENU UI
+# =========================================================
+
+MENU_SUBSCRIBE = "💳 Subscription ဝယ်ယူရန်"
+MENU_START = "▶️ Start"
+MENU_BALANCE = "📊 လက်ကျန်စစ်ရန်"
+MENU_ADMIN = "👨‍💻 Admin နှင့်ပြောရန်"
+MENU_HELP = "📖 အသုံးပြုနည်း"
+
+
+def main_menu_keyboard():
+    """Persistent customer menu. Keep the betting engine separate from the UI layer."""
+    return ReplyKeyboardMarkup(
+        [
+            [MENU_SUBSCRIBE],
+            [MENU_START, MENU_BALANCE],
+            [MENU_ADMIN, MENU_HELP],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder="Select an option...",
+    )
+
+
+def admin_inline_keyboard():
+    if not ADMIN_USERNAME:
+        return None
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💬 Admin Chat ဖွင့်ရန်", url=f"https://t.me/{ADMIN_USERNAME}")]
+    ])
+
+
+def remaining_subscription_text(expires_at):
+    if not expires_at:
+        return "0 ရက်"
+    now = datetime.now(timezone.utc)
+    expiry = expires_at
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+    seconds = max(0, int((expiry - now).total_seconds()))
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes = rem // 60
+    if days > 0:
+        return f"{days} ရက် {hours} နာရီ"
+    if hours > 0:
+        return f"{hours} နာရီ {minutes} မိနစ်"
+    return f"{minutes} မိနစ်"
+
+
+async def show_start_ready(update: Update):
+    await update.message.reply_text(
+        "👑 BETTING BAYIN V15.1 PRE-BET\n\n"
+        "📸 1XBET Pre-Bet Screenshot ပို့ပါ။\n"
+        "🎯 Single Tip ကို အလိုအလျောက်ရွေးပေးပါမယ်။\n\n"
+        "🔥 မောင်းတွဲချင်ရင် Screenshot တွေ တစ်ပွဲချင်းပို့ပြီး\n"
+        "‘ခုနက 5 ပွဲကို မောင်းတွဲ’ လို့ပို့နိုင်ပါတယ်။",
+        reply_markup=main_menu_keyboard(),
+    )
+
+
+async def show_balance(update: Update, user):
+    if is_admin(user.id):
+        await update.message.reply_text(
+            "🛡 ADMIN ACCOUNT\n\nSubscription မလိုပါ။",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    active, status, expires_at = check_license(user.id)
+    if active:
+        expiry_text = expires_at.strftime("%d-%m-%Y %H:%M UTC")
+        await update.message.reply_text(
+            "📊 SUBSCRIPTION လက်ကျန်\n\n"
+            "🟢 Status: ACTIVE\n"
+            f"⏳ လက်ကျန်: {remaining_subscription_text(expires_at)}\n"
+            f"📅 Expire: {expiry_text}",
+            reply_markup=main_menu_keyboard(),
+        )
+    else:
+        await update.message.reply_text(
+            "📊 SUBSCRIPTION လက်ကျန်\n\n"
+            f"🔴 Status: {str(status).upper()}\n"
+            "⏳ လက်ကျန်: 0 ရက်\n\n"
+            "Subscription ဝယ်ယူရန် အပေါ်က ခလုတ်ကိုနှိပ်ပါ။",
+            reply_markup=main_menu_keyboard(),
+        )
+
+
+async def show_subscription_purchase(update: Update, user):
+    await update.message.reply_text(
+        "💳 BETTING BAYIN SUBSCRIPTION\n\n"
+        "📦 WEEKLY PLAN\n"
+        "7 Days — 50,000 MMK\n\n"
+        "🆔 YOUR USER ID\n"
+        f"{user.id}\n\n"
+        "ငွေပေးချေမှုနဲ့ Activate လုပ်ရန် Admin ကို ဒီ User ID ပို့ပါ။\n"
+        f"📩 Admin: {ADMIN_CONTACT}",
+        reply_markup=admin_inline_keyboard(),
+    )
+
+
+async def show_admin_contact(update: Update):
+    await update.message.reply_text(
+        "👨‍💻 ADMIN SUPPORT\n\n"
+        f"📩 {ADMIN_CONTACT}\n\n"
+        "Subscription / Payment / Account ပြဿနာများကို Admin နှင့်ပြောနိုင်ပါတယ်။",
+        reply_markup=admin_inline_keyboard(),
+    )
+
+
+async def show_help(update: Update):
+    await update.message.reply_text(
+        "📖 BETTING BAYIN အသုံးပြုနည်း\n\n"
+        "1️⃣ ▶️ Start ကိုနှိပ်ပါ။\n"
+        "2️⃣ 1XBET Pre-Bet Match Screenshot တစ်ပုံပို့ပါ။\n"
+        "3️⃣ Bot က အကောင်းဆုံး Single Tip ကို ပြန်ပေးပါမယ်။\n"
+        "4️⃣ မောင်းတွဲချင်ရင် ပွဲတွေကို တစ်ပွဲချင်းပို့ပါ။\n"
+        "5️⃣ ပြီးရင် ‘ခုနက 5 ပွဲကို မောင်းတွဲ’ လို့ပို့ပါ။\n\n"
+        "⚠️ Live match screenshot မဟုတ်ဘဲ Pre-Bet screenshot ပို့ပါ။",
+        reply_markup=main_menu_keyboard(),
+    )
+
+
+# =========================================================
 # COMMANDS
 # =========================================================
 
@@ -473,17 +599,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if is_admin(user.id):
         await update.message.reply_text(
-            "👑 BETTING BAYIN V15.0 FINAL PRE-BET\n\n"
+            "👑 BETTING BAYIN V15.1 PRE-BET\n\n"
             "🛡 ADMIN MODE\n\n"
             f"Admin ID: {user.id}\n\n"
-            "COMMANDS\n\n"
+            "COMMANDS\n"
             "👤 /myid\n"
             "➕ /activate USER_ID DAYS\n"
             "⏳ /extend USER_ID DAYS\n"
             "🚫 /block USER_ID\n"
             "🔎 /status USER_ID\n\n"
-            "📸 Pre-match screenshot ပို့ပါ။\n"
-            "Vision → Research → Elo → Probability → Value → Final Decision ကို အလိုအလျောက် run ပါမယ်."
+            "📸 Pre-match screenshot ပို့နိုင်ပါတယ်။",
+            reply_markup=main_menu_keyboard(),
         )
         return
 
@@ -492,11 +618,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if active:
         expiry_text = expires_at.strftime("%d-%m-%Y %H:%M UTC")
         await update.message.reply_text(
-            "👑 BETTING BAYIN V15.0 FINAL PRE-BET\n\n"
+            "👑 BETTING BAYIN V15.1 PRE-BET\n\n"
             f"မင်္ဂလာပါ {user.first_name}!\n\n"
-            "🟢 SUBSCRIPTION ACTIVE\n\n"
-            f"⏳ Expire: {expiry_text}\n\n"
-            "📸 1XBET Pre-Bet Screenshot ပို့နိုင်ပါပြီ."
+            "🟢 SUBSCRIPTION ACTIVE\n"
+            f"⏳ လက်ကျန်: {remaining_subscription_text(expires_at)}\n"
+            f"📅 Expire: {expiry_text}\n\n"
+            "📸 1XBET Pre-Bet Screenshot ပို့နိုင်ပါပြီ။",
+            reply_markup=main_menu_keyboard(),
         )
         return
 
@@ -508,36 +636,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "7 Days — 50,000 MMK\n\n"
         "🆔 YOUR USER ID\n"
         f"{user.id}\n\n"
-        "Subscription activate လုပ်ရန် Admin ကို User ID ပို့ပေးပါ။\n"
-        f"📩 Admin: {ADMIN_CONTACT}"
+        "Subscription ဝယ်ယူရန် အပေါ်က ခလုတ်ကိုနှိပ်ပါ။",
+        reply_markup=main_menu_keyboard(),
     )
 
 
 async def subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-
-    if is_admin(user.id):
-        await update.message.reply_text(
-            "🛡 ADMIN ACCOUNT\n\n"
-            "Admin account သည် license မလိုဘဲ အသုံးပြုနိုင်ပါတယ်."
-        )
-        return
-
-    active, status, expires_at = check_license(user.id)
-
-    if active:
-        expiry_text = expires_at.strftime("%d-%m-%Y %H:%M UTC")
-        await update.message.reply_text(
-            "🟢 SUBSCRIPTION ACTIVE\n\n"
-            f"Expire:\n{expiry_text}"
-        )
-    else:
-        await update.message.reply_text(
-            "🔴 SUBSCRIPTION INACTIVE\n\n"
-            f"Status: {status.upper()}\n\n"
-            "🆔 User ID:\n"
-            f"{user.id}"
-        )
+    await show_balance(update, update.effective_user)
 
 
 async def activate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -797,22 +902,49 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = str(update.message.text or "").strip()
     low = text.lower()
-    parlay_words = ("မောင်း", "တွဲ", "parlay", "accumulator", "acca", "combo")
 
+    register_user(
+        telegram_id=user.id,
+        username=user.username,
+        first_name=user.first_name,
+    )
+
+    # Persistent keyboard actions
+    if text == MENU_START or low == "start":
+        await show_start_ready(update)
+        return
+    if text == MENU_BALANCE:
+        await show_balance(update, user)
+        return
+    if text == MENU_SUBSCRIBE:
+        await show_subscription_purchase(update, user)
+        return
+    if text == MENU_ADMIN:
+        await show_admin_contact(update)
+        return
+    if text == MENU_HELP:
+        await show_help(update)
+        return
+
+    # Natural-language parlay workflow remains unchanged.
+    parlay_words = ("မောင်း", "တွဲ", "parlay", "accumulator", "acca", "combo")
     if any(word in low for word in parlay_words):
         if not is_admin(user.id):
             active, status, expires_at = check_license(user.id)
             if not active:
-                await update.message.reply_text("🔒 Subscription မရှိပါ သို့မဟုတ် သက်တမ်းကုန်နေပါပြီ။")
+                await update.message.reply_text(
+                    "🔒 Subscription မရှိပါ သို့မဟုတ် သက်တမ်းကုန်နေပါပြီ။",
+                    reply_markup=main_menu_keyboard(),
+                )
                 return
-        await update.message.reply_text(await _build_parlay_reply(user.id, text))
+        await update.message.reply_text(await _build_parlay_reply(user.id, text), reply_markup=main_menu_keyboard())
         return
 
     await update.message.reply_text(
-        "👑 BETTING BAYIN V15.0 FINAL PRE-BET\n\n"
-        "📸 1XBET Pre-Bet Screenshot ပို့ပေးပါ.\n\n"
-        "မောင်းတွဲရန် — ဥပမာ ‘ခုနက 5 ပွဲကို မောင်းတွဲ’\n"
-        "🔐 Subscription စစ်ရန်: /subscription"
+        "👑 BETTING BAYIN V15.1 PRE-BET\n\n"
+        "အောက်က Menu ကနေ ရွေးချယ်နိုင်ပါတယ်။\n"
+        "📸 Tip ယူရန် Pre-Bet Screenshot ကို တိုက်ရိုက်ပို့နိုင်ပါတယ်။",
+        reply_markup=main_menu_keyboard(),
     )
 
 
@@ -821,7 +953,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 def main():
-    print("👑 BETTING BAYIN V15.0 FINAL PRE-BET")
+    print("👑 BETTING BAYIN V15.1 PRE-BET MENU")
     print("🟢 Starting...")
 
     if ADMIN_USER_ID:
