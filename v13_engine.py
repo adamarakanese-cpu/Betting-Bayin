@@ -1,7 +1,7 @@
 import math
 from deepseek_verifier import verify_model_context
 
-V13_VERSION = "V13.4"
+V13_VERSION = "V13.5"
 
 
 def _f(v):
@@ -123,10 +123,14 @@ def rank_visible_markets(extracted, calibration, reliability, deepseek_audit=Non
             if not odds or odds <= 1.0:
                 continue
             raw_model_p = _model_probability(name, item.get("selection"), calibration)
-            if raw_model_p is None:
-                continue
-            raw_model_p = _clamp(raw_model_p, 0.005, 0.995)
             market_p = _clamp(fair_map.get(id(item), 1.0 / odds), 0.005, 0.995)
+            # V13.5 ALWAYS-TIP fallback: if our statistical model does not natively
+            # support this visible market, use the de-vigged market consensus as
+            # a conservative baseline instead of discarding the selection.
+            model_supported = raw_model_p is not None
+            if raw_model_p is None:
+                raw_model_p = market_p
+            raw_model_p = _clamp(raw_model_p, 0.005, 0.995)
             robust_p = _clamp(raw_model_p * model_weight + market_p * (1.0 - model_weight), 0.005, 0.995)
             edge = robust_p - market_p
             ev = robust_p * odds - 1.0
@@ -153,6 +157,7 @@ def rank_visible_markets(extracted, calibration, reliability, deepseek_audit=Non
                 "ranking_score": score,
                 "evidence_confidence": evidence,
                 "market_anchor_weight": 1.0 - model_weight,
+                "model_supported": model_supported,
             })
     return sorted(candidates, key=lambda x: x["ranking_score"], reverse=True)
 
@@ -193,6 +198,12 @@ def build_v13_decision(extracted, research, probability, calibration):
     positive = [c for c in ranked if c["expected_value"] > 0 and c["edge"] > 0]
     pool = positive if positive else ranked
 
+    # Prefer markets backed by the internal probability model, while keeping
+    # every readable visible market eligible as an always-tip fallback.
+    supported = [c for c in pool if c.get("model_supported")]
+    if supported:
+        pool = supported
+
     # Avoid choosing a wild longshot just because its EV is noisy.
     practical = [c for c in pool if 1.10 <= c["odds"] <= 3.25]
     if practical:
@@ -225,54 +236,38 @@ def build_v13_decision(extracted, research, probability, calibration):
 
 
 def format_v13_tip(result):
+    """Customer-facing V13.5 report: match data + one actionable tip only."""
     match = result.get("match", {}) or {}
     extracted = result.get("extracted_data", {}) or {}
     v13 = result.get("v13", {}) or {}
     tip = v13.get("tip")
-    home = match.get("home_team") or "Home"
-    away = match.get("away_team") or "Away"
+
+    home = match.get("home_team") or (extracted.get("match") or {}).get("home_team") or "Home"
+    away = match.get("away_team") or (extracted.get("match") or {}).get("away_team") or "Away"
     league = match.get("competition") or extracted.get("competition") or "N/A"
+    live = extracted.get("live", {}) or {}
+    bet_type = "Live Bet" if live.get("is_live") else "Pre Bet"
 
     if not tip:
-        reasons = v13.get("gate_reasons") or []
-        reason_text = "\n".join(f"• {r}" for r in reasons[:4]) or "• Supported visible market မတွေ့ပါ"
         return (
-            "👑 BETTING BAYIN V13.4\n\n"
-            "⚠️ TIP မထုတ်နိုင်သေးပါ\n\n"
-            f"⚽ ပွဲစဉ် (Match): {home} vs {away}\n"
-            f"🏆 League: {league}\n\n"
-            f"{reason_text}\n\n"
-            "📸 1X2 / Double Chance / BTTS / Total 1.5, 2.5, 3.5 ပါတဲ့ screenshot ပို့ပါ။"
+            "👑 BETTING BAYIN V13.5\n\n"
+            f"⚽ {home} vs {away}\n"
+            f"🏆 {league}\n\n"
+            "📸 Market နဲ့ Odds မြင်ရအောင် screenshot ပြန်ပို့ပါ။"
         )
 
-    conf = tip["evidence_confidence"] * 100
-    prob = tip["model_probability"] * 100
-    edge = tip["edge"] * 100
-    ev = tip["expected_value"] * 100
-    audit = v13.get("deepseek_audit", {}) or {}
-    ai_status = "DeepSeek evidence audit ✓" if audit.get("status") == "OK" else "Statistical evidence audit"
-    warnings = v13.get("warnings") or []
-    warning_text = ""
-    if warnings:
-        warning_text = "\n⚠️ " + "\n⚠️ ".join(warnings[:2]) + "\n"
+    market = str(tip.get("market_name") or "Market").strip()
+    selection = str(tip.get("selection") or "").strip()
+    market_text = f"{market} — {selection}" if selection else market
+    odds = float(tip.get("odds") or 0.0)
+    probability = float(tip.get("model_probability") or 0.0) * 100.0
 
-    title = "🎯 BEST VALUE TIP" if tip["expected_value"] > 0 else "🛡 BEST AVAILABLE TIP"
     return (
-        "👑 BETTING BAYIN V13.4\n\n"
-        f"{title}\n\n"
-        f"⚽ ပွဲစဉ် (Match): {home} vs {away}\n"
-        f"🏆 League: {league}\n"
-        "🎫 လောင်းမည့်အမျိုးအစား (Bet Type): Pre Bet\n"
-        f"📌 Market: {tip['market_name']} - {tip['selection']}\n"
-        f"💰 Odds: {tip['odds']:.3f}\n"
-        f"📊 Robust Probability: {prob:.1f}%\n"
-        f"📈 Edge: {edge:+.1f}%\n"
-        f"💹 Expected Value: {ev:+.1f}%\n"
-        f"🛡 Evidence Confidence: {conf:.1f}%\n"
-        f"🏅 Grade: {tip['grade']}\n"
-        f"🧭 Mode: {tip['tip_mode']}\n"
-        f"🤖 Verification: {ai_status}\n"
-        f"{warning_text}\n"
-        "ℹ️ Low-data ပွဲများမှာ model probability ကို market no-vig consensus နဲ့ပိုမိုချိန်ညှိထားသည်။ "
-        "မည်သည့် model မှ အနိုင်ရလဒ်ကို အာမခံမပေးနိုင်ပါ။"
+        "👑 BETTING BAYIN V13.5\n\n"
+        f"⚽ {home} vs {away}\n"
+        f"🏆 {league}\n"
+        f"🎫 {bet_type}\n\n"
+        f"🎯 TIP: {market_text}\n"
+        f"💰 Odds: {odds:.3f}\n"
+        f"📊 Win Chance: {probability:.0f}%"
     )

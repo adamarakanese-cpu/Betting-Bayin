@@ -1,0 +1,7 @@
+BETTING BAYIN V13.5
+
+- Compact customer output: match, league, bet type, tip, odds, win chance only.
+- Removed customer-facing EV, edge, evidence confidence, grade, mode, verification and warning explanations.
+- Always-tip fallback now keeps readable screenshot markets eligible even when a market is not natively supported by the probability model.
+- Supported model markets remain preferred when available.
+- Lower leagues/friendlies remain eligible; internal uncertainty controls are retained for ranking.
