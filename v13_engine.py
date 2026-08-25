@@ -534,18 +534,16 @@ def rank_all_markets(extracted, probability, calibration, reliability, deepseek_
         c["source"] = "screenshot"
         visible_by_key[_market_key(c.get("market_name"), c.get("selection"), c.get("period"))] = c
 
+    # V17 strict visible-market policy: if readable real bookmaker prices exist,
+    # model-only/estimated markets cannot displace them. Hidden markets are used
+    # only when vision found no usable priced selection at all.
+    if visible:
+        return sorted(visible, key=lambda x: x["ranking_score"], reverse=True)
+
     hidden = _hidden_model_candidates(
         extracted, probability, calibration, reliability, deepseek_audit
     )
-
-    # Absolute rule: if the screenshot contains the same market/selection under
-    # an alias (e.g. 2X vs X2), never allow a synthetic candidate or estimated
-    # price to represent it. The screenshot quote is the source of truth.
-    hidden = [
-        c for c in hidden
-        if _market_key(c.get("market_name"), c.get("selection"), c.get("period")) not in visible_by_key
-    ]
-    return sorted(visible + hidden, key=lambda x: x["ranking_score"], reverse=True)
+    return sorted(hidden, key=lambda x: x["ranking_score"], reverse=True)
 
 def _tip_grade(candidate):
     e = candidate["evidence_confidence"]

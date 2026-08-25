@@ -1,0 +1,17 @@
+BETTING BAYIN V17.0 FINAL PRE-BET
+
+Implemented in this release:
+- Telegram album = one fixture = one final tip
+- OCR/team-name drift reconciliation across album pages
+- Parallel multi-screenshot vision extraction for lower latency
+- Actual visible bookmaker markets/odds have strict priority over hidden estimates
+- Persistent PostgreSQL league/team intelligence cache (SQLite local fallback)
+- Fresh verified research fills/refreshes knowledge; cached knowledge only fills gaps
+- Existing period-aware Regular Time / 1st Half / 2nd Half market handling preserved
+- Existing result tracking, calibration, parlay, subscription/admin and PostgreSQL persistence preserved
+- Health version updated to V17.0
+
+Important production notes:
+- Corners/cards cannot be made statistically reliable without dedicated historical corner/card feeds. V17 does not invent them.
+- Half-specific automatic settlement still requires a reliable half-time result source; full-time scores are not used to settle half bets.
+- Polling remains default for zero-config compatibility. Do not run a second instance with the same Telegram token.

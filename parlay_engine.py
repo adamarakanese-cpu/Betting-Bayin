@@ -97,6 +97,14 @@ def build_best_parlay(rows, requested_pool_size=None):
             avg_p = sum(probs) / size
             avg_evidence = sum(max(0.0, min(1.0, _f(x.get("evidence_confidence")))) for x in combo) / size
             estimated_count = sum(bool(x.get("odds_estimated")) for x in combo)
+            # Correlation/risk clustering: multiple legs from the same competition
+            # share league/weather/style uncertainty, so diversify when possible.
+            leagues = [str(x.get("competition") or "").strip().lower() for x in combo]
+            league_repeat_count = len(leagues) - len(set(x for x in leagues if x))
+            teams = []
+            for x in combo:
+                teams.extend([str(x.get("home_team") or "").strip().lower(), str(x.get("away_team") or "").strip().lower()])
+            team_repeat_count = len([t for t in teams if t]) - len(set(t for t in teams if t))
 
             odds_center = math.prod(max(1.01, _f(x.get("odds"), 1.01)) for x in combo)
             odds_low = math.prod(
@@ -119,6 +127,8 @@ def build_best_parlay(rows, requested_pool_size=None):
                 + avg_evidence * 0.18
                 + price_bonus
                 - estimated_count * 0.018
+                - league_repeat_count * 0.020
+                - team_repeat_count * 0.060
                 - max(0, size - 3) * 0.025
             )
             candidates.append({

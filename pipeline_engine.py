@@ -17,6 +17,7 @@ from calibration_engine import calibrate_probability_model
 from value_engine import calculate_market_value
 from context_profile import build_match_context_profile
 from v13_engine import build_v13_decision
+from knowledge_store import get_profile, save_research_knowledge
 
 
 # =========================================================
@@ -24,7 +25,7 @@ from v13_engine import build_v13_decision
 # UNIFIED PIPELINE ENGINE
 # =========================================================
 
-PIPELINE_VERSION = "V16.2 PRE-BET"
+PIPELINE_VERSION = "V17.0 FINAL PRE-BET"
 
 
 def _required_match_fields(extracted_data):
@@ -80,6 +81,15 @@ def _load_or_research(home, away, competition, match_date, force_refresh=False):
         match_date=match_date,
     )
 
+    # Persistent verified intelligence: fill gaps from prior league/team research.
+    # Fresh research always wins; cached profiles are never allowed to overwrite it.
+    if not raw_research.get("league_profile") or not (raw_research.get("league_profile") or {}).get("sample_size"):
+        raw_research["league_profile"] = get_profile("league", competition) or raw_research.get("league_profile") or {}
+    if not raw_research.get("home_team_profile") or not (raw_research.get("home_team_profile") or {}).get("sample_size"):
+        raw_research["home_team_profile"] = get_profile("team", home) or raw_research.get("home_team_profile") or {}
+    if not raw_research.get("away_team_profile") or not (raw_research.get("away_team_profile") or {}).get("sample_size"):
+        raw_research["away_team_profile"] = get_profile("team", away) or raw_research.get("away_team_profile") or {}
+
     if len(structured_home) >= 3:
         raw_research["home_recent_matches"] = structured_home
 
@@ -95,6 +105,8 @@ def _load_or_research(home, away, competition, match_date, force_refresh=False):
         match_date=match_date,
         payload=verified,
     )
+
+    save_research_knowledge(verified)
 
     return verified, {
         "source": "fresh_research",

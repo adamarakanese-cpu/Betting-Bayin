@@ -48,10 +48,11 @@ from v13_engine import format_v13_tip
 from parlay_engine import build_best_parlay, format_parlay
 from result_tracker import check_pending_results, start_result_tracker
 from screenshot_merge import merge_extractions
+from match_reconcile import reconcile_album_extractions
 
 
 # =========================================================
-# BETTING BAYIN V16.3 PRE-BET
+# BETTING BAYIN V17.0 FINAL PRE-BET
 # TELEGRAM BOT + FULL AI PIPELINE + RENDER HEALTH SERVER
 # =========================================================
 
@@ -151,7 +152,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             payload = {
                 "ok": True,
                 "service": "Betting Bayin",
-                "version": "V16.2 PRE-BET",
+                "version": "V17.0 FINAL PRE-BET",
                 "telegram_polling": True,
             }
             body = json.dumps(payload).encode("utf-8")
@@ -172,7 +173,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             body = json.dumps({
                 "ok": True,
                 "service": "Betting Bayin",
-                "version": "V16.2 PRE-BET",
+                "version": "V17.0 FINAL PRE-BET",
                 "telegram_polling": True,
             }).encode("utf-8")
             self.send_response(200)
@@ -992,7 +993,7 @@ async def settle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # PHOTO HANDLER
 # =========================================================
 
-MEDIA_GROUP_WAIT_SECONDS = 2.5
+MEDIA_GROUP_WAIT_SECONDS = float(os.getenv("MEDIA_GROUP_WAIT_SECONDS", "1.35"))
 MAX_SCREENSHOTS_PER_MATCH_BATCH = 8
 
 
@@ -1073,21 +1074,22 @@ async def _process_photo_file_ids(update, context, file_ids):
 
         # Accuracy first: extract every screenshot. This ensures Total/Handicap/
         # other pages sent in the same Telegram album are not silently ignored.
-        extractions = []
+        # V17: vision pages run concurrently. One slow screenshot no longer serially
+        # delays every other page in the album.
         page_errors = []
-        for page_index, temp_path in enumerate(temp_paths, start=1):
-            try:
-                extracted_page = await asyncio.to_thread(analyze_screenshot, temp_path)
-                if isinstance(extracted_page, dict):
-                    extractions.append(extracted_page)
-                else:
-                    page_errors.append(f"page {page_index}: invalid extraction type")
-            except Exception as error:
-                # One bad page must not destroy an otherwise usable Telegram album.
-                # Keep the exact upstream detail in Render logs for diagnosis.
-                detail = f"page {page_index}: {type(error).__name__}: {error}"
-                page_errors.append(detail)
-                print("VISION PAGE ERROR:", detail)
+        raw_results = await asyncio.gather(
+            *(asyncio.to_thread(analyze_screenshot, path) for path in temp_paths),
+            return_exceptions=True,
+        )
+        extractions = []
+        for page_index, item in enumerate(raw_results, start=1):
+            if isinstance(item, Exception):
+                detail = f"page {page_index}: {type(item).__name__}: {item}"
+                page_errors.append(detail); print("VISION PAGE ERROR:", detail)
+            elif isinstance(item, dict):
+                extractions.append(item)
+            else:
+                page_errors.append(f"page {page_index}: invalid extraction type")
 
         if not extractions:
             raise RuntimeError(
@@ -1095,23 +1097,16 @@ async def _process_photo_file_ids(update, context, file_ids):
                 " | ".join(page_errors[-4:])
             )
 
-        # Group by match identity. Same-match pages are merged; different matches
-        # in one album remain independent.
-        groups = {}
-        order = []
-        for idx, extracted in enumerate(extractions):
-            key = _match_group_key(extracted, idx)
-            if key not in groups:
-                groups[key] = []
-                order.append(key)
-            groups[key].append(extracted)
-
-        for key in order:
-            merged = merge_extractions(groups[key])
-            merged["screenshots_received"] = len(unique_ids)
-            merged["screenshots_extracted"] = len(extractions)
-            merged["vision_page_errors"] = page_errors
-            await _process_extracted_match(update, context, user, merged)
+        # V17 product rule: one Telegram album is ONE fixture and returns ONE tip.
+        # Reconcile OCR/vision team-name drift against the strongest page, then merge
+        # every visible period/market/odds page into one analysis.
+        reconciled, identity_meta = reconcile_album_extractions(extractions)
+        merged = merge_extractions(reconciled)
+        merged["screenshots_received"] = len(unique_ids)
+        merged["screenshots_extracted"] = len(extractions)
+        merged["vision_page_errors"] = page_errors
+        merged["album_identity"] = identity_meta
+        await _process_extracted_match(update, context, user, merged)
 
     except Exception as error:
         print("FULL PIPELINE ERROR:", repr(error))
