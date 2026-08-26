@@ -3,7 +3,7 @@ from deepseek_verifier import verify_model_context
 from performance_engine import apply_performance_feedback
 from intelligence_engine import apply_contextual_learning, apply_selection_intelligence, no_bet_gate
 
-V13_VERSION = "V19.3"
+V13_VERSION = "V19.4"
 
 
 def _f(v):
@@ -195,6 +195,53 @@ def _poisson_probs(lam, max_goals=9):
     return [v / total for v in vals]
 
 
+def _total_goal_distribution(probability, period="regular_time"):
+    expected = (probability or {}).get("expected_goals", {}) or {}
+    home_xg = _f(expected.get("home_xg"))
+    away_xg = _f(expected.get("away_xg"))
+    if home_xg is None or away_xg is None:
+        return None
+    period = _canonical_period(period)
+    share = 1.0 if period == "regular_time" else (0.44 if period == "1st_half" else 0.56)
+    lam = max(0.02, (home_xg + away_xg) * share)
+    return _poisson_probs(lam, max_goals=10)
+
+
+def _asian_total_components(probability, line, side="under", period="regular_time"):
+    """Return win/push/loss for integer Asian totals such as Under (3)."""
+    try:
+        line = float(line)
+    except (TypeError, ValueError):
+        return None
+    if abs(line - round(line)) > 1e-9:
+        return None
+    dist = _total_goal_distribution(probability, period)
+    if not dist:
+        return None
+    target = int(round(line))
+    push = dist[target] if 0 <= target < len(dist) else 0.0
+    if str(side).lower().startswith("under"):
+        win = sum(dist[:max(0, target)])
+    else:
+        win = sum(dist[target + 1:]) if target + 1 < len(dist) else 0.0
+    win = _clamp(win, 0.001, 0.998)
+    push = _clamp(push, 0.0, 0.95)
+    loss = _clamp(1.0 - win - push, 0.0, 0.999)
+    return {"win": win, "push": push, "loss": loss}
+
+
+def _integer_total_push_probability(market_name, selection, period, probability):
+    if _canonical_market(market_name) != "total":
+        return 0.0
+    import re
+    sel = _canonical_selection(market_name, selection)
+    m = re.search(r"(over|under)([0-9]+(?:\.[0-9]+)?)", sel)
+    if not m:
+        return 0.0
+    comp = _asian_total_components(probability, float(m.group(2)), m.group(1), period)
+    return float((comp or {}).get("push") or 0.0)
+
+
 def _period_model_probability(market_name, selection, period, calibration, probability):
     period = _canonical_period(period, market_name)
     if period == "regular_time":
@@ -344,7 +391,8 @@ def rank_visible_markets(extracted, probability, calibration, reliability, deeps
             raw_model_p = _clamp(raw_model_p, 0.005, 0.995)
             robust_p = _clamp(raw_model_p * model_weight + market_p * (1.0 - model_weight), 0.005, 0.995)
             edge = robust_p - market_p
-            ev = robust_p * odds - 1.0
+            push_p = _integer_total_push_probability(name, item.get("selection"), period, probability)
+            ev = robust_p * odds + push_p - 1.0
             risk = _market_risk(name, item.get("selection"), odds) + comp_penalty
 
             # Probability and evidence dominate; EV is capped to avoid long-shot traps.
@@ -366,6 +414,7 @@ def rank_visible_markets(extracted, probability, calibration, reliability, deeps
                 "market_probability": market_p,
                 "edge": edge,
                 "expected_value": ev,
+                "push_probability": push_p,
                 "risk_penalty": risk,
                 "ranking_score": score,
                 "evidence_confidence": evidence,
@@ -376,16 +425,18 @@ def rank_visible_markets(extracted, probability, calibration, reliability, deeps
 
 
 
-def _estimated_bookmaker_odds(probability, margin=0.045):
-    """Central estimate derived from probability; never presented as a live quote."""
+def _estimated_bookmaker_odds(probability, margin=0.045, push_probability=0.0):
+    """Central internal estimate; supports Asian-total push protection."""
     p = _clamp(probability, 0.01, 0.99)
-    offered = 1.0 / min(0.995, p * (1.0 + margin))
+    push = _clamp(push_probability, 0.0, 0.90)
+    fair = max(1.01, (1.0 - push) / p)
+    offered = fair / (1.0 + max(0.0, margin))
     return max(1.01, round(offered, 3))
 
 
-def _estimated_odds_range(probability, evidence, extracted, margin=0.045):
+def _estimated_odds_range(probability, evidence, extracted, margin=0.045, push_probability=0.0):
     """Return a probability-consistent bookmaker range for hidden markets."""
-    center = _estimated_bookmaker_odds(probability, margin)
+    center = _estimated_bookmaker_odds(probability, margin, push_probability)
     # Sparse competitions get a wider band. This is explicitly an estimate.
     comp = _competition_penalty(extracted)
     width = 0.06 + (1.0 - _clamp(evidence)) * 0.10 + comp * 0.55
@@ -405,16 +456,17 @@ def _hidden_model_candidates(extracted, probability, calibration, reliability, d
     totals = binary.get("totals", {}) or {}
     btts = binary.get("btts", {}) or {}
 
+    # specs: (market, selection, win_probability, base_risk, push_probability)
     specs = []
     h, d, a = one.get("home_win"), one.get("draw"), one.get("away_win")
     if None not in (h, d, a):
         specs += [
-            ("1X2", "W1", h, 0.07),
-            ("1X2", "Draw", d, 0.10),
-            ("1X2", "W2", a, 0.07),
-            ("Double Chance", "1X", h + d, -0.05),
-            ("Double Chance", "12", h + a, -0.03),
-            ("Double Chance", "2X", d + a, -0.05),
+            ("1X2", "W1", h, 0.07, 0.0),
+            ("1X2", "Draw", d, 0.10, 0.0),
+            ("1X2", "W2", a, 0.07, 0.0),
+            ("Double Chance", "1X", h + d, -0.05, 0.0),
+            ("Double Chance", "12", h + a, -0.03, 0.0),
+            ("Double Chance", "2X", d + a, -0.05, 0.0),
         ]
 
     for line in (1.5, 2.5, 3.5):
@@ -422,14 +474,29 @@ def _hidden_model_candidates(extracted, probability, calibration, reliability, d
         op = totals.get(f"over_{key}")
         un = totals.get(f"under_{key}")
         if op is not None:
-            specs.append(("Total", f"Over ({line})", op, 0.00))
+            specs.append(("Total", f"Over ({line})", op, 0.00, 0.0))
         if un is not None:
-            specs.append(("Total", f"Under ({line})", un, 0.00))
+            specs.append(("Total", f"Under ({line})", un, 0.00, 0.0))
+
+    # V19.4 nearby-market ladder. Integer Asian totals offer push protection and
+    # are often a much better single-bet compromise than a 1.05-1.10 safety market.
+    for line in (2.0, 3.0, 4.0):
+        for side in ("under", "over"):
+            comp = _asian_total_components(probability, line, side, "regular_time")
+            if comp:
+                label_line = int(line)
+                specs.append((
+                    "Total",
+                    f"{side.title()} ({label_line})",
+                    comp["win"],
+                    -0.015,
+                    comp["push"],
+                ))
 
     if btts.get("yes") is not None:
-        specs.append(("Both Teams To Score", "Yes", btts.get("yes"), 0.00))
+        specs.append(("Both Teams To Score", "Yes", btts.get("yes"), 0.00, 0.0))
     if btts.get("no") is not None:
-        specs.append(("Both Teams To Score", "No", btts.get("no"), 0.00))
+        specs.append(("Both Teams To Score", "No", btts.get("no"), 0.00, 0.0))
 
     # Extra model-derived goal markets from the Poisson expected-goals layer.
     # These are model picks only when the bookmaker quote is not visible.
@@ -445,8 +512,8 @@ def _hidden_model_candidates(extracted, probability, calibration, reliability, d
         # and a model-only price can be wildly different from the bookmaker.
         # They remain eligible when the real screenshot price is visible.
         specs += [
-            ("Total", "Over (4.5)", 1.0 - p_le4, 0.08),
-            ("Total", "Under (4.5)", p_le4, -0.01),
+            ("Total", "Over (4.5)", 1.0 - p_le4, 0.08, 0.0),
+            ("Total", "Under (4.5)", p_le4, -0.01, 0.0),
         ]
 
     # Correct-score candidates come from the model's score distribution. They
@@ -456,7 +523,7 @@ def _hidden_model_candidates(extracted, probability, calibration, reliability, d
         score = str(score_item.get("score") or "").strip()
         sp = _f(score_item.get("probability"))
         if score and sp is not None:
-            specs.append(("Correct Score", score, sp, 0.28))
+            specs.append(("Correct Score", score, sp, 0.28, 0.0))
 
     # Team-to-score / clean-sheet markets are available from the Poisson model,
     # though the calibration engine does not expose calibrated versions yet.
@@ -472,7 +539,7 @@ def _hidden_model_candidates(extracted, probability, calibration, reliability, d
         raw = _f(scoring.get(key))
         if raw is not None:
             robust = _clamp(raw * shrink_w + 0.50 * (1.0 - shrink_w), 0.01, 0.99)
-            specs.append((market, sel, robust, 0.01))
+            specs.append((market, sel, robust, 0.01, 0.0))
 
     # Deduplicate against screenshot-visible exact market/selection pairs so an
     # actual quoted price always wins over an estimate for the same selection.
@@ -482,12 +549,12 @@ def _hidden_model_candidates(extracted, probability, calibration, reliability, d
         for item in market.get("selections", []) or []:
             visible_pairs.add(_market_key(market.get("market_name"), item.get("selection"), market.get("period")))
 
-    for market_name, selection, p_raw, base_risk in specs:
+    for market_name, selection, p_raw, base_risk, push_p in specs:
         p = _uncertainty_shrink(p_raw, evidence, extracted)
         if _market_key(market_name, selection, "regular_time") in visible_pairs:
             continue
         margin = 0.12 if market_name == "Correct Score" else (0.05 if market_name == "1X2" else 0.04)
-        est_low, est_high, est_odds = _estimated_odds_range(p, evidence, extracted, margin)
+        est_low, est_high, est_odds = _estimated_odds_range(p, evidence, extracted, margin, push_p)
         risk = base_risk + comp_penalty + 0.025  # hidden-market uncertainty penalty
         if est_odds >= 4.0: risk += 0.14
         elif est_odds >= 3.0: risk += 0.08
@@ -495,13 +562,18 @@ def _hidden_model_candidates(extracted, probability, calibration, reliability, d
 
         # Hidden-market ranking is safety first: probability dominates. Because
         # the odds are estimated, no fake edge/EV is credited to the score.
-        score = p * 0.68 + evidence * 0.18 - risk * 0.20
-        # Mild preference for usable prices; avoid selecting 1.02 unless nothing
-        # else is remotely close in win probability.
-        if 1.15 <= est_odds <= 2.20:
-            score += 0.035
-        elif est_odds < 1.10:
-            score -= 0.035
+        score = p * 0.61 + evidence * 0.17 - risk * 0.18
+        # V19.4 practical-price preference. 1.20 is acceptable; 1.25+ is preferred.
+        if 1.25 <= est_odds <= 2.20:
+            score += 0.060
+        elif 1.20 <= est_odds < 1.25:
+            score += 0.015
+        elif est_odds < 1.15:
+            score -= 0.090
+        elif est_odds < 1.20:
+            score -= 0.040
+        if push_p > 0:
+            score += min(0.025, push_p * 0.10)
 
         out.append({
             "market_name": market_name,
@@ -517,6 +589,7 @@ def _hidden_model_candidates(extracted, probability, calibration, reliability, d
             "market_probability": None,
             "edge": 0.0,
             "expected_value": 0.0,
+            "push_probability": push_p,
             "risk_penalty": risk,
             "ranking_score": score,
             "evidence_confidence": evidence,
@@ -529,22 +602,18 @@ def _hidden_model_candidates(extracted, probability, calibration, reliability, d
 
 def rank_all_markets(extracted, probability, calibration, reliability, deepseek_audit=None):
     visible = rank_visible_markets(extracted, probability, calibration, reliability, deepseek_audit)
-    visible_by_key = {}
     for c in visible:
         c["odds_estimated"] = False
         c["source"] = "screenshot"
-        visible_by_key[_market_key(c.get("market_name"), c.get("selection"), c.get("period"))] = c
 
-    # V17 strict visible-market policy: if readable real bookmaker prices exist,
-    # model-only/estimated markets cannot displace them. Hidden markets are used
-    # only when vision found no usable priced selection at all.
-    if visible:
-        return sorted(visible, key=lambda x: x["ranking_score"], reverse=True)
-
+    # V19.4: keep model-derived nearby alternatives in the comparison even when
+    # screenshot prices exist. Exact visible pairs are already deduplicated inside
+    # _hidden_model_candidates, and estimated odds are never shown to customers.
     hidden = _hidden_model_candidates(
         extracted, probability, calibration, reliability, deepseek_audit
     )
-    return sorted(hidden, key=lambda x: x["ranking_score"], reverse=True)
+    combined = list(visible) + list(hidden)
+    return sorted(combined, key=lambda x: x["ranking_score"], reverse=True)
 
 def _tip_grade(candidate):
     e = candidate["evidence_confidence"]
@@ -575,7 +644,7 @@ def build_v13_decision(extracted, research, probability, calibration):
     # correction. It is bounded and does nothing until enough settled picks exist.
     ranked = apply_performance_feedback(ranked)
     ranked = apply_contextual_learning(ranked, extracted, research)
-    # V19.3: accuracy-first latency-free final ordering. Mandatory-tip behavior
+    # V19.4: value-aware latency-free final ordering. Mandatory-tip behavior
     # is preserved; weak candidates are demoted, never converted into NO BET.
     ranked = apply_selection_intelligence(ranked, extracted, research, audit)
     if not ranked:
@@ -585,50 +654,53 @@ def build_v13_decision(extracted, research, probability, calibration):
             "gate_reasons": ["Model ကတွက်နိုင်တဲ့ market မရှိသေးပါ။"],
         }
 
-    # V16.1 selector: exact screenshot prices are the default source of truth.
-    # Model-only hidden markets remain available, but cannot casually displace a
-    # practical real-price selection. This fixes repeated synthetic Over 0.5 tips
-    # and makes multi-page bookmaker screenshots actually useful.
-    # Do not throw away safer screenshot-visible choices merely because the
-    # statistical model lacks a native formula for that market. V19.3 ranks
-    # support quality as a bonus/penalty instead of a hard pre-filter.
+    # V19.4 single-bet selector: accuracy + usable payout. A price below 1.20
+    # is allowed only when no sufficiently strong practical alternative exists.
     pool = list(ranked)
 
-    safer = [c for c in pool if c["model_probability"] >= 0.55]
+    safer = [c for c in pool if float(c.get("model_probability") or 0.0) >= 0.52]
     if safer:
         pool = safer
 
-    practical = [c for c in pool if 1.08 <= c["odds"] <= 3.50]
-    if practical:
-        pool = practical
-
     def final_score(c):
-        # A real screenshot quote gets a meaningful source-quality bonus.
-        bonus = 0.070 if not c.get("odds_estimated") else 0.0
-        if not c.get("odds_estimated") and c.get("expected_value", 0) > 0:
-            bonus += min(0.035, c["expected_value"] * 0.10)
-        return c.get("selection_intelligence_score", c["ranking_score"]) + bonus
+        score = float(c.get("selection_intelligence_score", c.get("ranking_score", 0.0)) or 0.0)
+        # Real screenshot quote remains preferable in a close comparison.
+        score += 0.045 if not c.get("odds_estimated") else -0.015
+        if not c.get("odds_estimated") and float(c.get("expected_value") or 0.0) > 0:
+            score += min(0.025, float(c["expected_value"]) * 0.08)
+        return score
 
-    visible_pool = [c for c in pool if not c.get("odds_estimated")]
-    hidden_pool = [c for c in pool if c.get("odds_estimated")]
+    raw_best = max(pool, key=final_score)
+    raw_odds = float(raw_best.get("odds") or 0.0)
+    raw_p = float(raw_best.get("model_probability") or 0.0)
 
-    if visible_pool:
-        best_visible = max(visible_pool, key=final_score)
-        best = best_visible
-        multi_page_prices = int(extracted.get("screenshots_merged", 1) or 1) > 1
-        # If the user deliberately supplied several market pages for the same
-        # match, respect those real bookmaker quotes and do not replace them with
-        # a synthetic estimate. Hidden markets are a fallback for incomplete SS.
-        if hidden_pool and not multi_page_prices:
-            best_hidden = max(hidden_pool, key=final_score)
-            if (
-                final_score(best_hidden) >= final_score(best_visible) + 0.075
-                and best_hidden.get("model_probability", 0) >= best_visible.get("model_probability", 0) + 0.07
-                and best_hidden.get("odds", 0) >= 1.18
-            ):
-                best = best_hidden
+    practical = [
+        c for c in pool
+        if 1.20 <= float(c.get("odds") or 0.0) <= 3.50
+        and float(c.get("model_probability") or 0.0) >= 0.55
+    ]
+
+    if raw_odds and raw_odds < 1.20 and practical:
+        best_practical = max(practical, key=final_score)
+        practical_p = float(best_practical.get("model_probability") or 0.0)
+        # Never sacrifice more than ~20 probability points just to chase payout.
+        # If the practical choice is too weak, mandatory-tip falls back to raw_best.
+        if practical_p >= max(0.55, raw_p - 0.20):
+            best = best_practical
+        else:
+            best = raw_best
     else:
-        best = max(pool, key=final_score)
+        best = raw_best
+
+    # When both are practical, a visible real quote wins close calls, but a hidden
+    # model-derived nearby market may win if materially stronger. Its estimated
+    # internal price is never displayed to the customer.
+    visible_practical = [c for c in practical if not c.get("odds_estimated")]
+    if best.get("odds_estimated") and visible_practical:
+        best_visible = max(visible_practical, key=final_score)
+        if final_score(best) < final_score(best_visible) + 0.025:
+            best = best_visible
+
     gate_reasons = no_bet_gate(best, extracted, research, audit)
     if gate_reasons:
         return {

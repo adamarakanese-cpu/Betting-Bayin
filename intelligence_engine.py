@@ -97,15 +97,87 @@ def no_bet_gate(best, extracted, research, audit=None):
     return []
 
 
-def apply_selection_intelligence(candidates, extracted=None, research=None, audit=None):
-    """V19.3 accuracy-first mandatory selector (no extra network latency).
+def _candidate_thesis(candidate):
+    """Map different bookmaker markets to the same football idea.
 
-    Probability and evidence dominate. EV/edge are tie-breakers, real screenshot
-    prices are preferred, and unsupported/long-shot/ultra-short choices are
-    penalized rather than banned so a tip is still always produced.
+    This lets the selector move from a very short 'safe' price to a nearby,
+    better-paying market when both are driven by the same match thesis.
+    """
+    market = _norm(candidate.get("market_name"))
+    selection = _norm(candidate.get("selection"))
+    joined = f"{market} {selection}"
+
+    if (
+        ("total" in market and "under" in selection)
+        or ("both teams to score" in market and selection in {"no", "n"})
+        or ("btts" in market and selection in {"no", "n"})
+        or ("each team to score" in market and "2" in market and selection in {"no", "n"})
+        or ("each team to score" in joined and "2" in joined and joined.endswith(" no"))
+    ):
+        return "lower_scoring"
+
+    if (
+        ("total" in market and "over" in selection)
+        or ("both teams to score" in market and selection in {"yes", "y"})
+        or ("btts" in market and selection in {"yes", "y"})
+        or ("each team to score" in market and "2" in market and selection in {"yes", "y"})
+    ):
+        return "higher_scoring"
+
+    if market == "1x2" and selection.lower() in {"w1", "1", "home", "home win"}:
+        return "home_strength"
+    if "double chance" in market and selection.lower() in {"1x", "x1"}:
+        return "home_strength"
+    if market == "1x2" and selection.lower() in {"w2", "2", "away", "away win"}:
+        return "away_strength"
+    if "double chance" in market and selection.lower() in {"2x", "x2"}:
+        return "away_strength"
+    return None
+
+
+def _price_quality_adjustment(odds):
+    """Reward usable single-bet prices and strongly demote tiny payouts.
+
+    1.20 remains acceptable as requested, but the sweet spot starts around 1.25.
+    Nothing is hard-banned because the product still has a mandatory-tip policy.
+    """
+    if not odds or odds <= 1.0:
+        return -0.10
+    if odds < 1.08:
+        return -0.180
+    if odds < 1.15:
+        return -0.125
+    if odds < 1.20:
+        return -0.075
+    if odds < 1.25:
+        return -0.015
+    if odds <= 1.80:
+        return 0.050
+    if odds <= 2.20:
+        return 0.040
+    if odds <= 2.60:
+        return 0.020
+    if odds < 3.00:
+        return 0.000
+    if odds < 4.00:
+        return -0.040
+    return -0.085
+
+
+def apply_selection_intelligence(candidates, extracted=None, research=None, audit=None):
+    """V19.4 value-aware single-bet selector.
+
+    The old selector could choose 1.05-1.10 because raw win probability dominated
+    everything else. V19.4 keeps accuracy important but also asks whether the
+    payout is worth taking. When a short-price leader has a nearby market built on
+    the same football thesis (for example low-scoring -> Under 3), a practical
+    1.20+ alternative can overtake it if probability/evidence remain respectable.
+
+    This is still mandatory-tip: low odds are demoted, never converted to NO BET.
     """
     audit = audit or {}
     out = []
+
     for original in candidates or []:
         c = dict(original)
         p = _clamp(c.get("model_probability") or 0.5, 0.01, 0.99)
@@ -115,45 +187,94 @@ def apply_selection_intelligence(candidates, extracted=None, research=None, audi
         edge = float(c.get("edge") or 0.0)
         risk = max(0.0, float(c.get("risk_penalty") or 0.0))
 
-        # Accuracy-first composite.  A 10-point probability advantage must be
-        # difficult for noisy EV to overturn.
-        score = p * 0.72 + evidence * 0.14
-        score += max(-0.018, min(0.022, ev * 0.035))
-        score += max(-0.012, min(0.015, edge * 0.045))
-        score -= min(0.085, risk * 0.10)
+        # Accuracy still leads, but price/value now has enough weight to stop
+        # '85% @ 1.069' from automatically beating a sensible 1.25-1.60 option.
+        score = p * 0.585 + evidence * 0.135
+        score += max(-0.045, min(0.045, ev * 0.22))
+        score += max(-0.018, min(0.018, edge * 0.08))
+        score -= min(0.080, risk * 0.10)
 
-        # Source/model quality bonuses are deliberately smaller than probability.
-        score += 0.035 if not c.get("odds_estimated") else -0.025
-        score += 0.020 if c.get("model_supported") else -0.018
+        # Expected profit on a WIN (not EV) captures the user's practical point:
+        # a 1.06 winner barely pays anything even when its hit chance is high.
+        if odds > 1.0:
+            win_profit_mass = p * (odds - 1.0)
+            score += min(0.055, win_profit_mass * 0.20)
 
-        # Strongly demote genuinely weak candidates, without creating NO BET.
+        score += _price_quality_adjustment(odds)
+        score += 0.030 if not c.get("odds_estimated") else -0.030
+        score += 0.018 if c.get("model_supported") else -0.025
+
         if p < 0.45:
-            score -= 0.120
+            score -= 0.125
         elif p < 0.50:
-            score -= 0.080
+            score -= 0.085
         elif p < 0.55:
-            score -= 0.045
-        elif p >= 0.70:
-            score += 0.025
-        elif p >= 0.62:
-            score += 0.012
-
-        # Price usability: avoid both fake-safety ultra-short odds and long-shot traps.
-        if odds and odds < 1.08:
-            score -= 0.120
-        elif odds and odds < 1.15:
-            score -= 0.035
-        elif 1.20 <= odds <= 2.20:
-            score += 0.018
-        elif odds >= 4.0:
-            score -= 0.060
-        elif odds >= 3.0:
-            score -= 0.025
+            score -= 0.050
+        elif p >= 0.72:
+            score += 0.020
+        elif p >= 0.64:
+            score += 0.010
 
         if audit.get("contradiction"):
             score -= 0.025 + (1.0 - evidence) * 0.030
 
+        c["market_thesis"] = _candidate_thesis(c)
+        c["price_quality_adjustment"] = _price_quality_adjustment(odds)
         c["selection_intelligence_score"] = score
-        c["selection_intelligence_version"] = "V19.3"
+        c["selection_intelligence_version"] = "V19.4"
         out.append(c)
-    return sorted(out, key=lambda x: float(x.get("selection_intelligence_score") or -999), reverse=True)
+
+    if not out:
+        return []
+
+    # Find the raw safety leader before the nearby-market upgrade.
+    def safety_score(c):
+        return (
+            float(c.get("model_probability") or 0.0) * 0.78
+            + float(c.get("evidence_confidence") or 0.0) * 0.16
+            - max(0.0, float(c.get("risk_penalty") or 0.0)) * 0.08
+            + (0.02 if c.get("model_supported") else -0.01)
+        )
+
+    leader = max(out, key=safety_score)
+    leader_odds = float(leader.get("odds") or 0.0)
+    leader_p = float(leader.get("model_probability") or 0.0)
+    leader_ev = float(leader.get("expected_value") or 0.0)
+    thesis = leader.get("market_thesis")
+
+    if leader_odds and leader_odds < 1.20:
+        # A related 1.20+ market may replace the tiny-price safety pick when it
+        # retains enough probability.  20 percentage points is the maximum
+        # safety sacrifice; below 55% it is not considered a sensible substitute.
+        min_related_p = max(0.55, leader_p - 0.20)
+        for c in out:
+            if c is leader:
+                continue
+            odds = float(c.get("odds") or 0.0)
+            p = float(c.get("model_probability") or 0.0)
+            evidence = float(c.get("evidence_confidence") or 0.0)
+            if not (1.20 <= odds <= 2.60 and p >= min_related_p):
+                continue
+            if evidence + 0.20 < float(leader.get("evidence_confidence") or 0.0):
+                continue
+
+            same_thesis = thesis is not None and c.get("market_thesis") == thesis
+            materially_better_value = float(c.get("expected_value") or 0.0) >= leader_ev + 0.035
+            if same_thesis:
+                c["selection_intelligence_score"] += 0.095
+                c["nearby_market_upgrade"] = True
+                c["nearby_market_from"] = {
+                    "market_name": leader.get("market_name"),
+                    "selection": leader.get("selection"),
+                    "odds": leader_odds,
+                }
+            elif c.get("model_supported") and materially_better_value and p >= max(0.58, leader_p - 0.15):
+                c["selection_intelligence_score"] += 0.045
+                c["value_upgrade"] = True
+
+    return sorted(
+        out,
+        key=lambda x: float(x.get("selection_intelligence_score") or -999),
+        reverse=True,
+    )
+
