@@ -1,9 +1,10 @@
 import math
+import re
 from deepseek_verifier import verify_model_context
 from performance_engine import apply_performance_feedback
 from intelligence_engine import apply_contextual_learning, apply_selection_intelligence, no_bet_gate
 
-V13_VERSION = "V19.4"
+V13_VERSION = "V19.5"
 
 
 def _f(v):
@@ -63,57 +64,125 @@ def _scoped_market_name(market_name, period):
     return f"{_period_label(period)} {base}".strip()
 
 
+
 def _canonical_market(market_name):
-    """Canonical market families used only for matching/deduplication."""
+    """Normalize a broad set of 1XBET football market families.
+
+    V19.5 deliberately recognizes combo/handicap/team markets before generic
+    totals so they are not collapsed into the familiar 1X2/Total/BTTS buckets.
+    """
     m = _strip_period(market_name)
-    compact = m.replace(" ", "").replace("-", "")
-    if compact in {"1x2", "matchresult", "fulltimeresult"}:
+    compact = re.sub(r"[^a-z0-9]+", "", m)
+
+    # Combination markets first.
+    if (
+        ("result" in compact or "1x2" in compact or "w1" in compact or "w2" in compact)
+        and ("bothteamstoscore" in compact or "eachteamtoscore" in compact or "btts" in compact)
+    ):
+        return "result+btts"
+    if "doublechance" in compact and (
+        "bothteamstoscore" in compact or "eachteamtoscore" in compact or "btts" in compact
+    ):
+        return "double chance+btts"
+    if "doublechance" in compact and "total" in compact:
+        return "double chance+total"
+    if (
+        ("result" in compact or "1x2" in compact or "w1" in compact or "w2" in compact)
+        and "total" in compact
+    ):
+        return "result+total"
+
+    if "wintonil" in compact or "winnil" in compact:
+        if any(x in compact for x in ("team1", "home")):
+            return "home win to nil"
+        if any(x in compact for x in ("team2", "away")):
+            return "away win to nil"
+        return "any team win to nil"
+
+    if "eachteamtoscore" in compact:
+        return "each team to score n+"
+
+    if "handicap" in compact or "asianhandicap" in compact:
+        return "handicap"
+    if "drawnobet" in compact or compact == "dnb":
+        return "draw no bet"
+
+    if compact in {"1x2", "result", "matchresult", "fulltimeresult", "regularresult"}:
         return "1x2"
-    if "doublechance" in compact and "bothteam" not in compact:
+    if "doublechance" in compact:
         return "double chance"
     if compact in {"btts", "bothteamstoscore", "bothteamscore"} or "bothteamstoscore" in compact:
         return "btts"
-    if "total" in m and "team" not in m:
-        return "total"
-    if "home" in m and "team" in m and "total" in m:
+
+    # Team aliases: 1XBET often uses Team 1 / Team 2 rather than Home / Away.
+    if "total" in compact and any(x in compact for x in ("team1", "hometeam", "hometotal")):
         return "home team total"
-    if "away" in m and "team" in m and "total" in m:
+    if "total" in compact and any(x in compact for x in ("team2", "awayteam", "awaytotal")):
         return "away team total"
-    if "home" in m and "clean" in m and "sheet" in m:
+    if "total" in compact and "team" not in compact:
+        return "total"
+
+    if ("team1" in compact or "home" in compact) and "cleansheet" in compact:
         return "home clean sheet"
-    if "away" in m and "clean" in m and "sheet" in m:
+    if ("team2" in compact or "away" in compact) and "cleansheet" in compact:
         return "away clean sheet"
+    if ("team1" in compact or "home" in compact) and "toscore" in compact:
+        return "home team to score"
+    if ("team2" in compact or "away" in compact) and "toscore" in compact:
+        return "away team to score"
+
+    if "odd" in compact and "even" in compact:
+        return "total odd/even"
+    if "correctscore" in compact:
+        return "correct score"
+    if "qualif" in compact or "nextstage" in compact:
+        return "team to qualify"
     return m
 
 
 def _canonical_selection(market_name, selection):
-    """Normalize bookmaker aliases so visible prices always beat estimates."""
+    """Normalize common bookmaker aliases without destroying combo wording."""
     m = _strip_period(market_name)
-    s = _norm(selection).replace(" ", "")
-    if "doublechance" in m.replace(" ", ""):
-        if s in {"x2", "2x"}:
-            return "2x"
-        if s in {"1x", "x1"}:
-            return "1x"
-        if s in {"12", "21"}:
-            return "12"
-    if _canonical_market(market_name) == "1x2":
-        aliases = {"1": "w1", "w1": "w1", "home": "w1", "homewin": "w1",
-                   "x": "draw", "draw": "draw",
-                   "2": "w2", "w2": "w2", "away": "w2", "awaywin": "w2"}
-        return aliases.get(s, s)
     family = _canonical_market(market_name)
-    if family in {"total", "home team total", "away team total"}:
-        compact = s.replace("(", "").replace(")", "")
-        if compact.startswith("over"):
-            return "over" + compact[4:]
-        if compact.startswith("under"):
-            return "under" + compact[5:]
-    if family == "btts":
-        if s in {"yes", "y"}: return "yes"
-        if s in {"no", "n"}: return "no"
-    return s
+    raw = _norm(selection)
+    s = re.sub(r"\s+", "", raw)
 
+    if family in {"double chance", "double chance+btts", "double chance+total"}:
+        # Keep the rest of combo text intact; exact DC token is parsed later.
+        if family == "double chance":
+            compact = re.sub(r"[^a-z0-9]+", "", s)
+            if compact in {"x2", "2x"}: return "2x"
+            if compact in {"1x", "x1"}: return "1x"
+            if compact in {"12", "21"}: return "12"
+
+    if family in {"1x2", "draw no bet"}:
+        compact = re.sub(r"[^a-z0-9]+", "", s)
+        aliases = {
+            "1": "w1", "w1": "w1", "home": "w1", "homewin": "w1", "team1": "w1",
+            "x": "draw", "draw": "draw",
+            "2": "w2", "w2": "w2", "away": "w2", "awaywin": "w2", "team2": "w2",
+        }
+        return aliases.get(compact, compact)
+
+    if family in {"total", "home team total", "away team total"}:
+        match = re.search(r"\b(over|under|o|u)\b[^0-9]*([0-9]+(?:\.[0-9]+)?)", raw)
+        if not match:
+            match = re.search(r"(over|under|o|u)[^0-9]*([0-9]+(?:\.[0-9]+)?)", raw)
+        if match:
+            side = "over" if match.group(1) in {"over", "o"} else "under"
+            return f"{side}{match.group(2)}"
+
+    if family in {
+        "btts", "home clean sheet", "away clean sheet",
+        "home team to score", "away team to score",
+        "any team win to nil", "home win to nil", "away win to nil",
+        "each team to score n+",
+    }:
+        compact = re.sub(r"[^a-z0-9]+", "", raw)
+        if compact in {"yes", "y"}: return "yes"
+        if compact in {"no", "n"}: return "no"
+
+    return raw
 
 def _market_key(market_name, selection, period=None):
     # Period is part of identity: Regular Time Over 1.5 is NOT 1st Half Over 1.5.
@@ -230,97 +299,427 @@ def _asian_total_components(probability, line, side="under", period="regular_tim
     return {"win": win, "push": push, "loss": loss}
 
 
+
 def _integer_total_push_probability(market_name, selection, period, probability):
-    if _canonical_market(market_name) != "total":
+    components = _score_market_components(market_name, selection, period, probability)
+    if not components:
         return 0.0
-    import re
-    sel = _canonical_selection(market_name, selection)
-    m = re.search(r"(over|under)([0-9]+(?:\.[0-9]+)?)", sel)
-    if not m:
-        return 0.0
-    comp = _asian_total_components(probability, float(m.group(2)), m.group(1), period)
-    return float((comp or {}).get("push") or 0.0)
+    return float(components.get("push_probability") or 0.0)
 
-
-def _period_model_probability(market_name, selection, period, calibration, probability):
-    period = _canonical_period(period, market_name)
-    if period == "regular_time":
-        return _model_probability(market_name, selection, calibration)
-
+def _score_grid(probability, period="regular_time", max_goals=10):
+    """Independent-Poisson score grid used for visible specialist markets."""
     expected = (probability or {}).get("expected_goals", {}) or {}
     home_xg = _f(expected.get("home_xg"))
     away_xg = _f(expected.get("away_xg"))
     if home_xg is None or away_xg is None:
         return None
 
-    # Generic pre-match scoring split. We only use this for screenshot-visible
-    # half markets and still anchor strongly to the real bookmaker price.
-    share = 0.44 if period == "1st_half" else 0.56
-    h_lam = max(0.02, home_xg * share)
-    a_lam = max(0.02, away_xg * share)
-    h_probs = _poisson_probs(h_lam)
-    a_probs = _poisson_probs(a_lam)
+    period = _canonical_period(period)
+    share = 1.0 if period == "regular_time" else (0.44 if period == "1st_half" else 0.56)
+    h_probs = _poisson_probs(max(0.02, home_xg * share), max_goals=max_goals)
+    a_probs = _poisson_probs(max(0.02, away_xg * share), max_goals=max_goals)
+    return [(h, a, hp * ap) for h, hp in enumerate(h_probs) for a, ap in enumerate(a_probs)]
 
-    fam = _canonical_market(market_name)
-    sel = _canonical_selection(market_name, selection)
 
-    if fam in {"total", "home team total", "away team total"}:
-        import re
-        match = re.search(r"(over|under)([0-9]+(?:\.[0-9]+)?)", sel)
-        if not match:
-            return None
-        is_over = match.group(1) == "over"
-        line = float(match.group(2))
-        total_p = 0.0
-        for h, hp in enumerate(h_probs):
-            for a, ap in enumerate(a_probs):
-                value = (h + a) if fam == "total" else (h if fam == "home team total" else a)
-                if (value > line and is_over) or (value < line and not is_over):
-                    total_p += hp * ap
-        return _clamp(total_p, 0.005, 0.995)
+def _extract_ou(text):
+    text = _norm(text)
+    match = re.search(r"\b(over|under|o|u)\b[^0-9]*([0-9]+(?:\.[0-9]+)?)", text)
+    if not match:
+        match = re.search(r"(over|under|o|u)[^0-9]*([0-9]+(?:\.[0-9]+)?)", text)
+    if not match:
+        return None, None
+    side = "over" if match.group(1) in {"over", "o"} else "under"
+    return side, float(match.group(2))
 
-    if fam == "btts":
-        yes = (1.0 - h_probs[0]) * (1.0 - a_probs[0])
-        return yes if sel == "yes" else (1.0 - yes if sel == "no" else None)
 
-    home_win = draw = away_win = 0.0
-    for h, hp in enumerate(h_probs):
-        for a, ap in enumerate(a_probs):
-            p = hp * ap
-            if h > a:
-                home_win += p
-            elif h < a:
-                away_win += p
-            else:
-                draw += p
+def _extract_yes_no(text):
+    tokens = re.findall(r"\b(yes|no|y|n)\b", _norm(text))
+    if not tokens:
+        return None
+    token = tokens[-1]
+    return "yes" if token in {"yes", "y"} else "no"
 
-    if fam == "1x2":
-        if sel in {"w1", "home"}: return home_win
-        if sel == "draw": return draw
-        if sel in {"w2", "away"}: return away_win
-    if fam == "double chance":
-        if sel == "1x": return home_win + draw
-        if sel == "12": return home_win + away_win
-        if sel == "2x": return away_win + draw
+
+def _extract_outcome(text, allow_bare=True):
+    t = _norm(text)
+    compact = re.sub(r"[^a-z0-9]+", " ", t)
+
+    if re.search(r"\bw1\b|\bhome(?:\s*win)?\b|\bteam\s*1\b", compact):
+        return "home"
+    if re.search(r"\bw2\b|\baway(?:\s*win)?\b|\bteam\s*2\b", compact):
+        return "away"
+    if re.search(r"\bdraw\b", compact):
+        return "draw"
+
+    if allow_bare:
+        stripped = compact.strip()
+        if stripped in {"1", "home"}:
+            return "home"
+        if stripped in {"2", "away"}:
+            return "away"
+        if stripped in {"x", "draw"}:
+            return "draw"
+        # In combo strings a standalone result token may be separated by words.
+        if re.search(r"(?<![\d.])\b1\b(?![\d.])", t):
+            return "home"
+        if re.search(r"(?<![\d.])\b2\b(?![\d.])", t):
+            return "away"
+        if re.search(r"\bx\b", t):
+            return "draw"
     return None
 
 
-def _market_risk(market_name, selection, odds):
-    m = _norm(market_name)
-    if "double chance" in m:
-        risk = -0.05
-    elif "total" in m or "both teams to score" in m or m == "btts":
-        risk = 0.00
-    elif m == "1x2":
-        risk = 0.07
-    else:
-        risk = 0.10
-    if odds >= 4.0: risk += 0.16
-    elif odds >= 3.0: risk += 0.10
-    elif odds >= 2.25: risk += 0.04
-    elif odds < 1.15: risk += 0.05
-    return risk
+def _extract_double_chance(text):
+    compact = re.sub(r"[^a-z0-9]+", "", _norm(text))
+    if "1x" in compact or "x1" in compact:
+        return "1x"
+    if "2x" in compact or "x2" in compact:
+        return "2x"
+    # Avoid reading total line digits as "12".
+    if re.search(r"(^|[^0-9])12([^0-9]|$)", _norm(text)):
+        return "12"
+    return None
 
+
+def _extract_handicap(selection, market_name=""):
+    """Return (side, line) for common W1(-1), Team 2 (+0.5), Home -1 forms."""
+    text = f"{_norm(selection)} {_norm(market_name)}"
+    side = None
+    if re.search(r"\bw1\b|\bhome\b|\bteam\s*1\b|(?:^|\s)1\s*\(", text):
+        side = "home"
+    elif re.search(r"\bw2\b|\baway\b|\bteam\s*2\b|(?:^|\s)2\s*\(", text):
+        side = "away"
+
+    # Prefer signed number inside parentheses.
+    m = re.search(r"\(([+-]?\d+(?:\.\d+)?)\)", text)
+    if not m:
+        m = re.search(r"(?<![\d.])([+-]\d+(?:\.\d+)?)", text)
+    if not m:
+        # Zero handicap/DNB is valid even when rendered as (0).
+        m = re.search(r"\(\s*(0(?:\.0+)?)\s*\)", text)
+    if side is None or not m:
+        return None, None
+    return side, float(m.group(1))
+
+
+def _each_team_threshold(market_name, selection):
+    text = f"{_norm(market_name)} {_norm(selection)}"
+    # "Each Team To Score (2) Or More" / "Each Team To Score 2+".
+    m = re.search(r"each\s*team\s*to\s*score[^0-9]*([0-9]+)", text)
+    if not m:
+        m = re.search(r"([0-9]+)\s*(?:or\s*more|\+)", text)
+    return int(m.group(1)) if m else 2
+
+
+def _score_market_components(market_name, selection, period, probability):
+    """Return {'probability','push_probability'} for score-derived visible markets.
+
+    This is the core V19.5 market-coverage layer. It models the actual event
+    described by the bookmaker selection instead of falling back to whichever
+    familiar family the old engine already understood.
+    """
+    grid = _score_grid(probability, period)
+    if not grid:
+        return None
+
+    family = _canonical_market(market_name)
+    raw_sel = str(selection or "")
+    joined = f"{market_name} {raw_sel}"
+    canon_sel = _canonical_selection(market_name, selection)
+
+    def aggregate(status_fn):
+        win = push = 0.0
+        for h, a, mass in grid:
+            status = status_fn(h, a)
+            if status == "win":
+                win += mass
+            elif status == "push":
+                push += mass
+        return {
+            "probability": _clamp(win, 0.001, 0.998),
+            "push_probability": _clamp(push, 0.0, 0.95),
+        }
+
+    def result_status(h, a, outcome):
+        actual = "home" if h > a else ("away" if a > h else "draw")
+        return actual == outcome
+
+    if family == "1x2":
+        outcome = _extract_outcome(raw_sel)
+        if not outcome:
+            return None
+        return aggregate(lambda h, a: "win" if result_status(h, a, outcome) else "loss")
+
+    if family == "double chance":
+        dc = _canonical_selection(market_name, selection)
+        if dc == "1x":
+            return aggregate(lambda h, a: "win" if h >= a else "loss")
+        if dc == "12":
+            return aggregate(lambda h, a: "win" if h != a else "loss")
+        if dc == "2x":
+            return aggregate(lambda h, a: "win" if a >= h else "loss")
+        return None
+
+    if family == "draw no bet":
+        outcome = _extract_outcome(raw_sel)
+        if outcome not in {"home", "away"}:
+            return None
+        if outcome == "home":
+            return aggregate(lambda h, a: "win" if h > a else ("push" if h == a else "loss"))
+        return aggregate(lambda h, a: "win" if a > h else ("push" if h == a else "loss"))
+
+    if family in {"total", "home team total", "away team total"}:
+        side, line = _extract_ou(raw_sel)
+        if side is None or line is None:
+            return None
+
+        def total_status(h, a):
+            value = h + a if family == "total" else (h if family == "home team total" else a)
+            diff = value - line
+            if abs(diff) < 1e-9:
+                return "push"
+            won = diff > 0 if side == "over" else diff < 0
+            return "win" if won else "loss"
+
+        return aggregate(total_status)
+
+    if family == "btts":
+        yn = _extract_yes_no(raw_sel)
+        if yn is None:
+            return None
+        return aggregate(
+            lambda h, a: "win"
+            if ((h > 0 and a > 0) == (yn == "yes"))
+            else "loss"
+        )
+
+    if family == "each team to score n+":
+        yn = _extract_yes_no(raw_sel)
+        if yn is None:
+            return None
+        threshold = _each_team_threshold(market_name, selection)
+        return aggregate(
+            lambda h, a: "win"
+            if ((h >= threshold and a >= threshold) == (yn == "yes"))
+            else "loss"
+        )
+
+    if family in {"home team to score", "away team to score"}:
+        yn = _extract_yes_no(raw_sel)
+        if yn is None:
+            return None
+        is_home = family.startswith("home")
+        return aggregate(
+            lambda h, a: "win"
+            if (((h > 0) if is_home else (a > 0)) == (yn == "yes"))
+            else "loss"
+        )
+
+    if family in {"home clean sheet", "away clean sheet"}:
+        yn = _extract_yes_no(raw_sel)
+        if yn is None:
+            return None
+        is_home = family.startswith("home")
+        return aggregate(
+            lambda h, a: "win"
+            if (((a == 0) if is_home else (h == 0)) == (yn == "yes"))
+            else "loss"
+        )
+
+    if family in {"any team win to nil", "home win to nil", "away win to nil"}:
+        yn = _extract_yes_no(raw_sel)
+        if yn is None:
+            # Some books label team-specific selection itself rather than Yes/No.
+            yn = "yes"
+
+        specific = _extract_outcome(raw_sel)
+        def happened(h, a):
+            if family == "home win to nil" or (family == "any team win to nil" and specific == "home"):
+                return h > a and a == 0
+            if family == "away win to nil" or (family == "any team win to nil" and specific == "away"):
+                return a > h and h == 0
+            return (h > a and a == 0) or (a > h and h == 0)
+
+        return aggregate(lambda h, a: "win" if (happened(h, a) == (yn == "yes")) else "loss")
+
+    if family == "handicap":
+        side, line = _extract_handicap(raw_sel, market_name)
+        if side is None or line is None:
+            return None
+
+        def handicap_status(h, a):
+            adjusted = (h + line - a) if side == "home" else (a + line - h)
+            if abs(adjusted) < 1e-9:
+                return "push"
+            return "win" if adjusted > 0 else "loss"
+
+        return aggregate(handicap_status)
+
+    if family == "result+btts":
+        outcome = _extract_outcome(raw_sel) or _extract_outcome(market_name)
+        yn = _extract_yes_no(raw_sel)
+        if not outcome or yn is None:
+            return None
+        return aggregate(
+            lambda h, a: "win"
+            if (result_status(h, a, outcome) and ((h > 0 and a > 0) == (yn == "yes")))
+            else "loss"
+        )
+
+    if family == "double chance+btts":
+        dc = _extract_double_chance(raw_sel)
+        yn = _extract_yes_no(raw_sel)
+        if not dc or yn is None:
+            return None
+
+        def dc_ok(h, a):
+            if dc == "1x": return h >= a
+            if dc == "12": return h != a
+            if dc == "2x": return a >= h
+            return False
+
+        return aggregate(
+            lambda h, a: "win"
+            if (dc_ok(h, a) and ((h > 0 and a > 0) == (yn == "yes")))
+            else "loss"
+        )
+
+    if family in {"result+total", "double chance+total"}:
+        side, line = _extract_ou(raw_sel)
+        if side is None or line is None:
+            return None
+
+        if family == "result+total":
+            outcome = _extract_outcome(raw_sel) or _extract_outcome(market_name)
+            if not outcome:
+                return None
+
+            def result_part(h, a):
+                return result_status(h, a, outcome)
+        else:
+            dc = _extract_double_chance(raw_sel)
+            if not dc:
+                return None
+
+            def result_part(h, a):
+                if dc == "1x": return h >= a
+                if dc == "12": return h != a
+                if dc == "2x": return a >= h
+                return False
+
+        def combo_status(h, a):
+            value = h + a
+            total_ok = value > line if side == "over" else value < line
+            # Combo-market settlement varies for integer lines; do not credit a
+            # synthetic push here. A line equality is treated conservatively.
+            return "win" if (result_part(h, a) and total_ok) else "loss"
+
+        return aggregate(combo_status)
+
+    if family == "total odd/even":
+        s = _norm(raw_sel)
+        want_odd = "odd" in s
+        want_even = "even" in s
+        if not (want_odd or want_even):
+            return None
+        return aggregate(
+            lambda h, a: "win"
+            if (((h + a) % 2 == 1) if want_odd else ((h + a) % 2 == 0))
+            else "loss"
+        )
+
+    if family == "correct score":
+        m = re.search(r"(\d+)\D+(\d+)", raw_sel)
+        if not m:
+            return None
+        ph, pa = int(m.group(1)), int(m.group(2))
+        return aggregate(lambda h, a: "win" if (h, a) == (ph, pa) else "loss")
+
+    # Team-to-qualify and other aggregate/penalty markets cannot be inferred
+    # safely from one match's 90-minute score distribution.
+    return None
+
+
+def _visible_model_components(market_name, selection, period, calibration, probability):
+    """Prefer calibrated core probabilities, then score-derived broad markets."""
+    family = _canonical_market(market_name)
+    period = _canonical_period(period, market_name)
+
+    # Core calibrated families remain the highest-quality source for regular time.
+    if period == "regular_time":
+        calibrated = _model_probability(market_name, selection, calibration)
+        if calibrated is not None:
+            push = 0.0
+            score_comp = _score_market_components(market_name, selection, period, probability)
+            if score_comp:
+                push = float(score_comp.get("push_probability") or 0.0)
+            return {
+                "probability": _clamp(calibrated, 0.005, 0.995),
+                "push_probability": push,
+                "source": "calibrated_core",
+            }
+
+    score_comp = _score_market_components(market_name, selection, period, probability)
+    if score_comp:
+        return {
+            "probability": _clamp(score_comp["probability"], 0.005, 0.995),
+            "push_probability": float(score_comp.get("push_probability") or 0.0),
+            "source": "score_model",
+        }
+    return None
+
+
+def _period_model_probability(market_name, selection, period, calibration, probability):
+    components = _visible_model_components(
+        market_name, selection, period, calibration, probability
+    )
+    if not components:
+        return None
+    return components.get("probability")
+
+
+def _market_risk(market_name, selection, odds):
+    """Family-neutral risk: complexity matters, not whether the market is familiar."""
+    family = _canonical_market(market_name)
+
+    if family == "correct score":
+        risk = 0.24
+    elif family in {"result+btts", "result+total", "double chance+btts", "double chance+total"}:
+        risk = 0.045
+    elif family in {"any team win to nil", "home win to nil", "away win to nil"}:
+        risk = 0.040
+    elif family in {"1x2"}:
+        risk = 0.035
+    elif family in {"handicap", "draw no bet", "each team to score n+"}:
+        risk = 0.025
+    elif family in {
+        "double chance", "btts", "total", "home team total", "away team total",
+        "home clean sheet", "away clean sheet", "home team to score",
+        "away team to score", "total odd/even",
+    }:
+        risk = 0.018
+    elif family == "team to qualify":
+        # Can depend on aggregate score/extra time/penalties, so 90-min model is weaker.
+        risk = 0.060
+    else:
+        risk = 0.070
+
+    if odds >= 5.0:
+        risk += 0.18
+    elif odds >= 4.0:
+        risk += 0.12
+    elif odds >= 3.0:
+        risk += 0.075
+    elif odds >= 2.25:
+        risk += 0.030
+    elif odds < 1.10:
+        risk += 0.075
+    elif odds < 1.15:
+        risk += 0.050
+    elif odds < 1.20:
+        risk += 0.020
+
+    return risk
 
 def _competition_penalty(extracted):
     c = _norm(extracted.get("competition"))
@@ -354,58 +753,93 @@ def _evidence_confidence(reliability, audit):
     return _clamp(evidence)
 
 
-def rank_visible_markets(extracted, probability, calibration, reliability, deepseek_audit=None):
-    """Rank only screenshot-visible markets supported by the probability model.
 
-    V13.4 uses market anchoring when evidence is sparse. This prevents a weak-data
-    model from creating huge artificial edges while still allowing lower leagues
-    and friendlies to produce a cautious best-available tip.
+def rank_visible_markets(extracted, probability, calibration, reliability, deepseek_audit=None):
+    """V19.5: compare every readable screenshot market on one common scale.
+
+    Core markets use calibrated probabilities. Team totals, handicaps, win-to-nil,
+    result+BTTS, result+total, double-chance combos, half markets and other
+    score-defined selections are evaluated from the match score distribution.
+    Truly unsupported markets remain eligible through bookmaker consensus, but
+    they receive an uncertainty penalty instead of silently dominating the model.
     """
     candidates = []
     evidence = _evidence_confidence(reliability, deepseek_audit or {})
     comp_penalty = _competition_penalty(extracted)
 
-    # Weak evidence => lean more on no-vig market consensus; strong evidence => model gets more weight.
-    model_weight = _clamp(0.22 + evidence * 0.68, 0.22, 0.90)
-
     for market in extracted.get("markets", []) or []:
         name = str(market.get("market_name") or "Unknown")
         period = _canonical_period(market.get("period"), name)
-        scoped_name = _scoped_market_name(name, period)
         selections = market.get("selections", []) or []
-        fair_map = _no_vig(selections)
+        family = _canonical_market(name)
+
+        # Double Chance selections overlap and must not be normalized as if
+        # mutually exclusive. Most other visible market blocks are safe to de-vig.
+        fair_map = {} if family == "double chance" else _no_vig(selections)
+
         for item in selections:
             odds = _f(item.get("odds"))
             if not odds or odds <= 1.0:
                 continue
-            raw_model_p = _period_model_probability(
+
+            raw_implied = _clamp(1.0 / odds, 0.005, 0.995)
+            market_p = _clamp(fair_map.get(id(item), raw_implied), 0.005, 0.995)
+
+            components = _visible_model_components(
                 name, item.get("selection"), period, calibration, probability
             )
-            market_p = _clamp(fair_map.get(id(item), 1.0 / odds), 0.005, 0.995)
-            # V13.5 ALWAYS-TIP fallback: if our statistical model does not natively
-            # support this visible market, use the de-vigged market consensus as
-            # a conservative baseline instead of discarding the selection.
-            model_supported = raw_model_p is not None
-            if raw_model_p is None:
+            model_supported = components is not None
+
+            if model_supported:
+                raw_model_p = _clamp(components["probability"], 0.005, 0.995)
+                push_p = float(components.get("push_probability") or 0.0)
+                model_source = str(components.get("source") or "score_model")
+
+                # Calibrated core gets full evidence weight. Score-derived specialist
+                # markets are intentionally a little more anchored to the real price.
+                if model_source == "calibrated_core":
+                    model_weight = _clamp(0.24 + evidence * 0.68, 0.24, 0.90)
+                else:
+                    model_weight = _clamp(0.18 + evidence * 0.58, 0.18, 0.78)
+                robust_p = _clamp(
+                    raw_model_p * model_weight + market_p * (1.0 - model_weight),
+                    0.005, 0.995
+                )
+            else:
                 raw_model_p = market_p
-            raw_model_p = _clamp(raw_model_p, 0.005, 0.995)
-            robust_p = _clamp(raw_model_p * model_weight + market_p * (1.0 - model_weight), 0.005, 0.995)
+                push_p = 0.0
+                model_source = "bookmaker_anchor_only"
+                model_weight = 0.0
+                robust_p = market_p
+
             edge = robust_p - market_p
-            push_p = _integer_total_push_probability(name, item.get("selection"), period, probability)
             ev = robust_p * odds + push_p - 1.0
             risk = _market_risk(name, item.get("selection"), odds) + comp_penalty
+            if not model_supported:
+                risk += 0.055
 
-            # Probability and evidence dominate; EV is capped to avoid long-shot traps.
+            # No market-family popularity bonus. A supported Team Total or combo
+            # competes directly with W1/BTTS/Total using the same probability,
+            # evidence, value and risk terms.
             score = (
-                robust_p * 0.52
-                + evidence * 0.20
-                + max(-0.08, min(0.12, ev)) * 0.18
-                + max(-0.05, min(0.10, edge)) * 0.10
-                - risk * 0.22
+                robust_p * 0.50
+                + evidence * 0.17
+                + max(-0.10, min(0.14, ev)) * 0.19
+                + max(-0.06, min(0.10, edge)) * 0.08
+                - risk * 0.20
             )
+
+            # Real, model-readable specialist markets deserve to be considered,
+            # not penalized simply because older versions did not know the family.
+            if model_supported:
+                score += 0.018
+            else:
+                score -= 0.020
+
             candidates.append({
                 "market_name": _strip_period_display(name) or name,
                 "base_market_name": _strip_period_display(name) or name,
+                "market_family": family,
                 "period": period,
                 "selection": _display_selection(name, item.get("selection")),
                 "odds": odds,
@@ -420,10 +854,10 @@ def rank_visible_markets(extracted, probability, calibration, reliability, deeps
                 "evidence_confidence": evidence,
                 "market_anchor_weight": 1.0 - model_weight,
                 "model_supported": model_supported,
+                "model_source": model_source,
             })
+
     return sorted(candidates, key=lambda x: x["ranking_score"], reverse=True)
-
-
 
 def _estimated_bookmaker_odds(probability, margin=0.045, push_probability=0.0):
     """Central internal estimate; supports Asian-total push protection."""
@@ -478,7 +912,7 @@ def _hidden_model_candidates(extracted, probability, calibration, reliability, d
         if un is not None:
             specs.append(("Total", f"Under ({line})", un, 0.00, 0.0))
 
-    # V19.4 nearby-market ladder. Integer Asian totals offer push protection and
+    # V19.5 nearby-market ladder. Integer Asian totals offer push protection and
     # are often a much better single-bet compromise than a 1.05-1.10 safety market.
     for line in (2.0, 3.0, 4.0):
         for side in ("under", "over"):
@@ -563,7 +997,7 @@ def _hidden_model_candidates(extracted, probability, calibration, reliability, d
         # Hidden-market ranking is safety first: probability dominates. Because
         # the odds are estimated, no fake edge/EV is credited to the score.
         score = p * 0.61 + evidence * 0.17 - risk * 0.18
-        # V19.4 practical-price preference. 1.20 is acceptable; 1.25+ is preferred.
+        # V19.5 practical-price preference. 1.20 is acceptable; 1.25+ is preferred.
         if 1.25 <= est_odds <= 2.20:
             score += 0.060
         elif 1.20 <= est_odds < 1.25:
@@ -606,7 +1040,7 @@ def rank_all_markets(extracted, probability, calibration, reliability, deepseek_
         c["odds_estimated"] = False
         c["source"] = "screenshot"
 
-    # V19.4: keep model-derived nearby alternatives in the comparison even when
+    # V19.5: keep model-derived nearby alternatives in the comparison even when
     # screenshot prices exist. Exact visible pairs are already deduplicated inside
     # _hidden_model_candidates, and estimated odds are never shown to customers.
     hidden = _hidden_model_candidates(
@@ -644,7 +1078,7 @@ def build_v13_decision(extracted, research, probability, calibration):
     # correction. It is bounded and does nothing until enough settled picks exist.
     ranked = apply_performance_feedback(ranked)
     ranked = apply_contextual_learning(ranked, extracted, research)
-    # V19.4: value-aware latency-free final ordering. Mandatory-tip behavior
+    # V19.5: value-aware latency-free final ordering. Mandatory-tip behavior
     # is preserved; weak candidates are demoted, never converted into NO BET.
     ranked = apply_selection_intelligence(ranked, extracted, research, audit)
     if not ranked:
@@ -654,7 +1088,7 @@ def build_v13_decision(extracted, research, probability, calibration):
             "gate_reasons": ["Model ကတွက်နိုင်တဲ့ market မရှိသေးပါ။"],
         }
 
-    # V19.4 single-bet selector: accuracy + usable payout. A price below 1.20
+    # V19.5 single-bet selector: accuracy + usable payout. A price below 1.20
     # is allowed only when no sufficiently strong practical alternative exists.
     pool = list(ranked)
 

@@ -4,6 +4,7 @@ Adds bounded, sample-gated league/team outcome memory and a mandatory best-avail
 It does not add network calls and therefore does not alter the V18 speed path.
 """
 from functools import lru_cache
+import re
 from database import get_performance_rows
 
 
@@ -97,43 +98,48 @@ def no_bet_gate(best, extracted, research, audit=None):
     return []
 
 
-def _candidate_thesis(candidate):
-    """Map different bookmaker markets to the same football idea.
 
-    This lets the selector move from a very short 'safe' price to a nearby,
-    better-paying market when both are driven by the same match thesis.
-    """
+def _candidate_thesis(candidate):
+    """Group different bookmaker markets by the football idea they express."""
     market = _norm(candidate.get("market_name"))
     selection = _norm(candidate.get("selection"))
     joined = f"{market} {selection}"
+    family = _norm(candidate.get("market_family"))
 
+    # Goal environment.
     if (
-        ("total" in market and "under" in selection)
-        or ("both teams to score" in market and selection in {"no", "n"})
-        or ("btts" in market and selection in {"no", "n"})
-        or ("each team to score" in market and "2" in market and selection in {"no", "n"})
-        or ("each team to score" in joined and "2" in joined and joined.endswith(" no"))
+        ("under" in selection and "total" in market)
+        or ("both teams to score" in market and re.search(r"\bno\b", selection))
+        or ("btts" in market and re.search(r"\bno\b", selection))
+        or ("each team to score" in joined and re.search(r"\bno\b", selection))
+        or ("win to nil" in market and not re.search(r"\bno\b", selection))
     ):
         return "lower_scoring"
 
     if (
-        ("total" in market and "over" in selection)
-        or ("both teams to score" in market and selection in {"yes", "y"})
-        or ("btts" in market and selection in {"yes", "y"})
-        or ("each team to score" in market and "2" in market and selection in {"yes", "y"})
+        ("over" in selection and "total" in market)
+        or ("both teams to score" in market and re.search(r"\byes\b", selection))
+        or ("btts" in market and re.search(r"\byes\b", selection))
+        or ("each team to score" in joined and re.search(r"\byes\b", selection))
     ):
         return "higher_scoring"
 
-    if market == "1x2" and selection.lower() in {"w1", "1", "home", "home win"}:
-        return "home_strength"
-    if "double chance" in market and selection.lower() in {"1x", "x1"}:
-        return "home_strength"
-    if market == "1x2" and selection.lower() in {"w2", "2", "away", "away win"}:
-        return "away_strength"
-    if "double chance" in market and selection.lower() in {"2x", "x2"}:
-        return "away_strength"
-    return None
+    # Team-strength ideas also cover handicaps, team totals and result combos.
+    if (
+        selection in {"w1", "1", "home", "home win", "1x", "x1"}
+        or re.search(r"\bw1\b|\bteam\s*1\b|\bhome\b", joined)
+    ):
+        if "under" not in selection:
+            return "home_strength"
 
+    if (
+        selection in {"w2", "2", "away", "away win", "2x", "x2"}
+        or re.search(r"\bw2\b|\bteam\s*2\b|\baway\b", joined)
+    ):
+        if "under" not in selection:
+            return "away_strength"
+
+    return family or None
 
 def _price_quality_adjustment(odds):
     """Reward usable single-bet prices and strongly demote tiny payouts.
@@ -164,16 +170,14 @@ def _price_quality_adjustment(odds):
     return -0.085
 
 
+
 def apply_selection_intelligence(candidates, extracted=None, research=None, audit=None):
-    """V19.4 value-aware single-bet selector.
+    """V19.5 market-neutral value-aware single-bet selector.
 
-    The old selector could choose 1.05-1.10 because raw win probability dominated
-    everything else. V19.4 keeps accuracy important but also asks whether the
-    payout is worth taking. When a short-price leader has a nearby market built on
-    the same football thesis (for example low-scoring -> Under 3), a practical
-    1.20+ alternative can overtake it if probability/evidence remain respectable.
-
-    This is still mandatory-tip: low odds are demoted, never converted to NO BET.
+    Every readable market can compete on probability, evidence, price, EV and risk.
+    There is no bonus for being W1/Total/BTTS and no artificial diversity/randomness.
+    A Team Total, handicap, combo or half-market wins only when its risk-adjusted
+    case is genuinely stronger.
     """
     audit = audit or {}
     out = []
@@ -186,30 +190,36 @@ def apply_selection_intelligence(candidates, extracted=None, research=None, audi
         ev = float(c.get("expected_value") or 0.0)
         edge = float(c.get("edge") or 0.0)
         risk = max(0.0, float(c.get("risk_penalty") or 0.0))
+        supported = bool(c.get("model_supported"))
 
-        # Accuracy still leads, but price/value now has enough weight to stop
-        # '85% @ 1.069' from automatically beating a sensible 1.25-1.60 option.
-        score = p * 0.585 + evidence * 0.135
-        score += max(-0.045, min(0.045, ev * 0.22))
-        score += max(-0.018, min(0.018, edge * 0.08))
-        score -= min(0.080, risk * 0.10)
+        # Accuracy remains first, but a single bet must also pay enough to justify risk.
+        score = p * 0.555 + evidence * 0.125
+        score += max(-0.050, min(0.055, ev * 0.24))
+        score += max(-0.020, min(0.020, edge * 0.10))
+        score -= min(0.095, risk * 0.12)
 
-        # Expected profit on a WIN (not EV) captures the user's practical point:
-        # a 1.06 winner barely pays anything even when its hit chance is high.
         if odds > 1.0:
             win_profit_mass = p * (odds - 1.0)
-            score += min(0.055, win_profit_mass * 0.20)
+            score += min(0.060, win_profit_mass * 0.21)
 
         score += _price_quality_adjustment(odds)
-        score += 0.030 if not c.get("odds_estimated") else -0.030
-        score += 0.018 if c.get("model_supported") else -0.025
+        score += 0.034 if not c.get("odds_estimated") else -0.034
+
+        # V19.5 broad score-model support gets the same trust treatment as familiar
+        # families; bookmaker-anchor-only markets stay eligible but carry uncertainty.
+        if supported:
+            score += 0.028
+            if c.get("model_source") == "score_model":
+                score += 0.006
+        else:
+            score -= 0.040
 
         if p < 0.45:
-            score -= 0.125
+            score -= 0.135
         elif p < 0.50:
-            score -= 0.085
+            score -= 0.090
         elif p < 0.55:
-            score -= 0.050
+            score -= 0.052
         elif p >= 0.72:
             score += 0.020
         elif p >= 0.64:
@@ -221,19 +231,18 @@ def apply_selection_intelligence(candidates, extracted=None, research=None, audi
         c["market_thesis"] = _candidate_thesis(c)
         c["price_quality_adjustment"] = _price_quality_adjustment(odds)
         c["selection_intelligence_score"] = score
-        c["selection_intelligence_version"] = "V19.4"
+        c["selection_intelligence_version"] = "V19.5"
         out.append(c)
 
     if not out:
         return []
 
-    # Find the raw safety leader before the nearby-market upgrade.
     def safety_score(c):
         return (
-            float(c.get("model_probability") or 0.0) * 0.78
-            + float(c.get("evidence_confidence") or 0.0) * 0.16
-            - max(0.0, float(c.get("risk_penalty") or 0.0)) * 0.08
-            + (0.02 if c.get("model_supported") else -0.01)
+            float(c.get("model_probability") or 0.0) * 0.76
+            + float(c.get("evidence_confidence") or 0.0) * 0.15
+            - max(0.0, float(c.get("risk_penalty") or 0.0)) * 0.09
+            + (0.025 if c.get("model_supported") else -0.020)
         )
 
     leader = max(out, key=safety_score)
@@ -243,9 +252,6 @@ def apply_selection_intelligence(candidates, extracted=None, research=None, audi
     thesis = leader.get("market_thesis")
 
     if leader_odds and leader_odds < 1.20:
-        # A related 1.20+ market may replace the tiny-price safety pick when it
-        # retains enough probability.  20 percentage points is the maximum
-        # safety sacrifice; below 55% it is not considered a sensible substitute.
         min_related_p = max(0.55, leader_p - 0.20)
         for c in out:
             if c is leader:
@@ -253,15 +259,16 @@ def apply_selection_intelligence(candidates, extracted=None, research=None, audi
             odds = float(c.get("odds") or 0.0)
             p = float(c.get("model_probability") or 0.0)
             evidence = float(c.get("evidence_confidence") or 0.0)
-            if not (1.20 <= odds <= 2.60 and p >= min_related_p):
+            if not (1.20 <= odds <= 2.80 and p >= min_related_p):
                 continue
             if evidence + 0.20 < float(leader.get("evidence_confidence") or 0.0):
                 continue
 
             same_thesis = thesis is not None and c.get("market_thesis") == thesis
-            materially_better_value = float(c.get("expected_value") or 0.0) >= leader_ev + 0.035
-            if same_thesis:
-                c["selection_intelligence_score"] += 0.095
+            materially_better_value = float(c.get("expected_value") or 0.0) >= leader_ev + 0.030
+
+            if same_thesis and c.get("model_supported"):
+                c["selection_intelligence_score"] += 0.105
                 c["nearby_market_upgrade"] = True
                 c["nearby_market_from"] = {
                     "market_name": leader.get("market_name"),
@@ -269,7 +276,7 @@ def apply_selection_intelligence(candidates, extracted=None, research=None, audi
                     "odds": leader_odds,
                 }
             elif c.get("model_supported") and materially_better_value and p >= max(0.58, leader_p - 0.15):
-                c["selection_intelligence_score"] += 0.045
+                c["selection_intelligence_score"] += 0.050
                 c["value_upgrade"] = True
 
     return sorted(
