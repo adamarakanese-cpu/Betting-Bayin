@@ -150,11 +150,11 @@ def _price_quality_adjustment(odds):
     if not odds or odds <= 1.0:
         return -0.10
     if odds < 1.08:
-        return -0.180
+        return -0.420
     if odds < 1.15:
-        return -0.125
+        return -0.360
     if odds < 1.20:
-        return -0.075
+        return -0.300
     if odds < 1.25:
         return -0.015
     if odds <= 1.80:
@@ -172,7 +172,7 @@ def _price_quality_adjustment(odds):
 
 
 def apply_selection_intelligence(candidates, extracted=None, research=None, audit=None):
-    """V19.5 market-neutral value-aware single-bet selector.
+    """V19.6 derived-market + hard-floor single-bet selector.
 
     Every readable market can compete on probability, evidence, price, EV and risk.
     There is no bonus for being W1/Total/BTTS and no artificial diversity/randomness.
@@ -228,10 +228,20 @@ def apply_selection_intelligence(candidates, extracted=None, research=None, audi
         if audit.get("contradiction"):
             score -= 0.025 + (1.0 - evidence) * 0.030
 
+        # V19.6 HARD FLOOR: a real screenshot quote below 1.20 is never
+        # eligible for the final single bet. Keep it in diagnostics only so we can
+        # compare its football thesis with better model-derived alternatives.
+        if (not c.get("odds_estimated")) and 1.0 < odds < 1.20:
+            c["single_bet_ineligible"] = True
+            c["single_bet_ineligible_reason"] = "VISIBLE_ODDS_BELOW_1_20"
+            score -= 1.0
+        else:
+            c["single_bet_ineligible"] = False
+
         c["market_thesis"] = _candidate_thesis(c)
         c["price_quality_adjustment"] = _price_quality_adjustment(odds)
         c["selection_intelligence_score"] = score
-        c["selection_intelligence_version"] = "V19.5"
+        c["selection_intelligence_version"] = "V19.6"
         out.append(c)
 
     if not out:
