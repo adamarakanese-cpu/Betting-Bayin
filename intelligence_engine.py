@@ -1,4 +1,4 @@
-"""V19 accuracy intelligence layer.
+"""V20 SAFE BIG ODD intelligence layer.
 
 Adds bounded, sample-gated league/team outcome memory and a mandatory best-available-tip policy.
 It does not add network calls and therefore does not alter the V18 speed path.
@@ -85,7 +85,7 @@ def apply_contextual_learning(candidates, extracted, research):
 def no_bet_gate(best, extracted, research, audit=None):
     """Mandatory-tip policy for valid analyzable pre-bet matches.
 
-    V19.1 never rejects a ranked candidate merely because evidence is sparse,
+    V20 never rejects a ranked candidate merely because evidence is sparse,
     probability is modest, the price is short, EV is negative, or sources conflict.
     Those factors remain inside ranking/confidence, so the engine still chooses the
     best available candidate rather than fabricating certainty.
@@ -142,42 +142,38 @@ def _candidate_thesis(candidate):
     return family or None
 
 def _price_quality_adjustment(odds):
-    """Reward usable single-bet prices and strongly demote tiny payouts.
+    """V20 SAFE BIG ODD price shaping.
 
-    1.20 remains acceptable as requested, but the sweet spot starts around 1.25.
-    Nothing is hard-banned because the product still has a mandatory-tip policy.
+    Final selection has a hard 1.80 floor. Price itself is never allowed to dominate
+    football probability: the preferred zone is 1.80-2.80, while very large prices
+    are progressively penalized because they normally imply lower hit probability.
     """
     if not odds or odds <= 1.0:
-        return -0.10
-    if odds < 1.08:
-        return -0.420
-    if odds < 1.15:
-        return -0.360
-    if odds < 1.20:
-        return -0.300
-    if odds < 1.25:
-        return -0.015
-    if odds <= 1.80:
-        return 0.050
-    if odds <= 2.20:
-        return 0.040
-    if odds <= 2.60:
-        return 0.020
-    if odds < 3.00:
-        return 0.000
+        return -1.000
+    if odds < 1.80:
+        return -0.850
+    if odds <= 2.05:
+        return 0.090
+    if odds <= 2.40:
+        return 0.078
+    if odds <= 2.80:
+        return 0.060
+    if odds <= 3.20:
+        return 0.030
     if odds < 4.00:
-        return -0.040
-    return -0.085
+        return -0.020
+    if odds < 5.00:
+        return -0.080
+    return -0.150
 
 
 
 def apply_selection_intelligence(candidates, extracted=None, research=None, audit=None):
-    """V19.6 derived-market + hard-floor single-bet selector.
+    """V20 SAFE BIG ODD single-bet selector.
 
-    Every readable market can compete on probability, evidence, price, EV and risk.
-    There is no bonus for being W1/Total/BTTS and no artificial diversity/randomness.
-    A Team Total, handicap, combo or half-market wins only when its risk-adjusted
-    case is genuinely stronger.
+    The final target is one actionable Single Bet with an internal/real price >=1.80.
+    Within that price floor, probability, evidence quality and risk remain more important
+    than raw odds. Weak matches are not converted to NO BET; they receive lower grades.
     """
     audit = audit or {}
     out = []
@@ -192,18 +188,22 @@ def apply_selection_intelligence(candidates, extracted=None, research=None, audi
         risk = max(0.0, float(c.get("risk_penalty") or 0.0))
         supported = bool(c.get("model_supported"))
 
-        # Accuracy remains first, but a single bet must also pay enough to justify risk.
-        score = p * 0.555 + evidence * 0.125
-        score += max(-0.050, min(0.055, ev * 0.24))
-        score += max(-0.020, min(0.020, edge * 0.10))
-        score -= min(0.095, risk * 0.12)
+        # Accuracy remains first. The price floor is a constraint, not a reason to
+        # chase the highest odd. This deliberately favors the safest 1.80+ option.
+        score = p * 0.620 + evidence * 0.150
+        score += max(-0.045, min(0.050, ev * 0.20))
+        score += max(-0.018, min(0.018, edge * 0.09))
+        score -= min(0.115, risk * 0.16)
 
         if odds > 1.0:
+            # Small value reward only; raw return must never overwhelm hit probability.
             win_profit_mass = p * (odds - 1.0)
-            score += min(0.060, win_profit_mass * 0.21)
+            score += min(0.035, win_profit_mass * 0.10)
 
         score += _price_quality_adjustment(odds)
-        score += 0.034 if not c.get("odds_estimated") else -0.034
+        # Real bookmaker confirmation is useful, but derived markets remain valid
+        # when the screenshot does not expose a suitable 1.80+ quote.
+        score += 0.024 if not c.get("odds_estimated") else -0.018
 
         # V19.5 broad score-model support gets the same trust treatment as familiar
         # families; bookmaker-anchor-only markets stay eligible but carry uncertainty.
@@ -228,20 +228,23 @@ def apply_selection_intelligence(candidates, extracted=None, research=None, audi
         if audit.get("contradiction"):
             score -= 0.025 + (1.0 - evidence) * 0.030
 
-        # V19.6 HARD FLOOR: a real screenshot quote below 1.20 is never
-        # eligible for the final single bet. Keep it in diagnostics only so we can
-        # compare its football thesis with better model-derived alternatives.
-        if (not c.get("odds_estimated")) and 1.0 < odds < 1.20:
+        # V20 HARD FLOOR: both real quotes and private derived-price estimates must
+        # clear 1.80 before they can become the final SAFE BIG ODD Single Tip.
+        # Sub-1.80 candidates stay in diagnostics because they can identify the safest
+        # football thesis and help us upgrade to a nearby 1.80+ market.
+        if 1.0 < odds < 1.80:
             c["single_bet_ineligible"] = True
-            c["single_bet_ineligible_reason"] = "VISIBLE_ODDS_BELOW_1_20"
+            c["single_bet_ineligible_reason"] = "ODDS_BELOW_1_80"
             score -= 1.0
         else:
             c["single_bet_ineligible"] = False
+            c["single_bet_ineligible_reason"] = None
+        c["safe_big_odd_eligible"] = bool(odds >= 1.80)
 
         c["market_thesis"] = _candidate_thesis(c)
         c["price_quality_adjustment"] = _price_quality_adjustment(odds)
         c["selection_intelligence_score"] = score
-        c["selection_intelligence_version"] = "V19.6"
+        c["selection_intelligence_version"] = "V20.0"
         out.append(c)
 
     if not out:
@@ -261,15 +264,18 @@ def apply_selection_intelligence(candidates, extracted=None, research=None, audi
     leader_ev = float(leader.get("expected_value") or 0.0)
     thesis = leader.get("market_thesis")
 
-    if leader_odds and leader_odds < 1.20:
-        min_related_p = max(0.55, leader_p - 0.20)
+    if leader_odds and leader_odds < 1.80:
+        # The safest raw thesis may be a short-priced market. Upgrade to a nearby
+        # expression of the same idea that clears 1.80 without sacrificing too much
+        # model probability.
+        min_related_p = max(0.46, leader_p - 0.20)
         for c in out:
             if c is leader:
                 continue
             odds = float(c.get("odds") or 0.0)
             p = float(c.get("model_probability") or 0.0)
             evidence = float(c.get("evidence_confidence") or 0.0)
-            if not (1.20 <= odds <= 2.80 and p >= min_related_p):
+            if not (1.80 <= odds <= 3.20 and p >= min_related_p):
                 continue
             if evidence + 0.20 < float(leader.get("evidence_confidence") or 0.0):
                 continue
@@ -278,15 +284,15 @@ def apply_selection_intelligence(candidates, extracted=None, research=None, audi
             materially_better_value = float(c.get("expected_value") or 0.0) >= leader_ev + 0.030
 
             if same_thesis and c.get("model_supported"):
-                c["selection_intelligence_score"] += 0.105
+                c["selection_intelligence_score"] += 0.135
                 c["nearby_market_upgrade"] = True
                 c["nearby_market_from"] = {
                     "market_name": leader.get("market_name"),
                     "selection": leader.get("selection"),
                     "odds": leader_odds,
                 }
-            elif c.get("model_supported") and materially_better_value and p >= max(0.58, leader_p - 0.15):
-                c["selection_intelligence_score"] += 0.050
+            elif c.get("model_supported") and materially_better_value and p >= max(0.50, leader_p - 0.15):
+                c["selection_intelligence_score"] += 0.060
                 c["value_upgrade"] = True
 
     return sorted(

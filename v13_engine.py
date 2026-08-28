@@ -4,7 +4,7 @@ from deepseek_verifier import verify_model_context
 from performance_engine import apply_performance_feedback
 from intelligence_engine import apply_contextual_learning, apply_selection_intelligence, no_bet_gate
 
-V13_VERSION = "V19.6"
+V13_VERSION = "V20.0"
 
 
 def _f(v):
@@ -880,7 +880,7 @@ def _estimated_odds_range(probability, evidence, extracted, margin=0.045, push_p
 
 
 def _hidden_model_candidates(extracted, probability, calibration, reliability, deepseek_audit=None):
-    """V19.6: generate model-derived betting markets even when not shown.
+    """V20: generate model-derived betting markets even when not shown.
 
     Screenshot data anchors the fixture and any real bookmaker prices that are visible.
     The score model is free to derive other football markets from the same match model.
@@ -1018,16 +1018,16 @@ def _hidden_model_candidates(extracted, probability, calibration, reliability, d
         # Model-derived markets are ranked primarily by probability/evidence/risk.
         # Estimated price is only a private sanity signal; it is never printed.
         score = p * 0.61 + evidence * 0.17 - risk * 0.18
-        if 1.30 <= est_odds <= 2.20:
-            score += 0.070
-        elif 1.20 <= est_odds < 1.30:
-            score += 0.025
-        elif est_odds < 1.20:
-            score -= 0.085
-        elif 2.20 < est_odds <= 3.00:
-            score += 0.010
+        if 1.80 <= est_odds <= 2.20:
+            score += 0.080
+        elif 2.20 < est_odds <= 2.80:
+            score += 0.050
+        elif 2.80 < est_odds <= 3.20:
+            score += 0.020
+        elif est_odds < 1.80:
+            score -= 0.090
         elif est_odds > 4.00:
-            score -= 0.060
+            score -= 0.075
         if push_p > 0:
             score += min(0.030, push_p * 0.11)
 
@@ -1102,43 +1102,61 @@ def build_v13_decision(extracted, research, probability, calibration):
     # correction. It is bounded and does nothing until enough settled picks exist.
     ranked = apply_performance_feedback(ranked)
     ranked = apply_contextual_learning(ranked, extracted, research)
-    # V19.6: model-derived market expansion + hard real-odds floor. Mandatory-tip behavior
-    # is preserved; weak candidates are demoted, never converted into NO BET.
+    # V20: SAFE BIG ODD Single-only mode. Mandatory-tip behavior is preserved;
+    # weak candidates are demoted/graded, never converted into NO BET.
     ranked = apply_selection_intelligence(ranked, extracted, research, audit)
     if not ranked:
         return {
-            "version": V13_VERSION, "status": "NO_SUPPORTED_VISIBLE_MARKET", "tip": None,
+            "version": V13_VERSION, "status": "NEED_INPUT", "tip": None,
             "ranked_candidates": [], "deepseek_audit": audit, "reliability": reliability,
-            "gate_reasons": ["Model ကတွက်နိုင်တဲ့ market မရှိသေးပါ။"],
+            "gate_reasons": ["Model ကတွက်နိုင်တဲ့ match/market data မလုံလောက်ပါ။"],
+            "warnings": ["Input/extraction incomplete — this is not a NO BET decision"],
         }
 
-    # V19.6 FINAL SELECTOR
-    # 1) Prefer model-supported markets whenever the engine can model them.
-    #    This stops bookmaker-anchor-only markets (e.g. Team To Qualify) from
-    #    dominating merely because they are familiar/short priced.
-    pool = list(ranked)
-    supported_pool = [c for c in pool if c.get("model_supported")]
-    if supported_pool:
-        pool = supported_pool
-
-    # 2) HARD FLOOR for REAL screenshot odds. A known quote below 1.20 is never
-    #    allowed as the final Single Tip. Derived markets have no known bookmaker
-    #    odds, so they remain eligible and their internal estimate is never shown.
-    floor_eligible = [
-        c for c in pool
-        if c.get("odds_estimated")
-        or float(c.get("odds") or 0.0) >= 1.20
+    # V20 FINAL SELECTOR — SAFE BIG ODD, SINGLE BET ONLY.
+    # 1) 1.80 is a hard final floor for both real screenshot odds and private
+    #    model-derived price estimates. Sub-1.80 selections may guide the thesis,
+    #    but can never be the customer-facing final pick.
+    big_odd_pool = [
+        c for c in ranked
+        if float(c.get("odds") or 0.0) >= 1.80
+        and not c.get("single_bet_ineligible")
     ]
-    if floor_eligible:
-        pool = floor_eligible
-    else:
-        # Mandatory-tip fallback: use model-derived markets only. Do NOT fall back
-        # to a real 1.01-1.19 quote that the user explicitly rejected.
-        derived_only = [c for c in ranked if c.get("odds_estimated") and c.get("model_supported")]
-        if derived_only:
-            pool = derived_only
 
-    safer = [c for c in pool if float(c.get("model_probability") or 0.0) >= 0.52]
+    # 2) Prefer model-supported candidates, but never throw away every valid 1.80+
+    #    option merely because a market family is not model-readable. This preserves
+    #    mandatory-tip behavior for unusual bookmaker screens.
+    supported_big = [c for c in big_odd_pool if c.get("model_supported")]
+    pool = supported_big or big_odd_pool
+
+    # 3) If ranking produced candidates but none clears 1.80, do not silently return
+    #    NO BET. Prefer a derived 1.80+ alternative from the complete ranked list.
+    #    In normal model runs this branch is rarely needed because derived handicap,
+    #    combo and half markets cover the return zone broadly.
+    if not pool:
+        derived_big = [
+            c for c in ranked
+            if c.get("odds_estimated")
+            and float(c.get("odds") or 0.0) >= 1.80
+        ]
+        pool = derived_big
+
+    # A valid football model should normally make the pool non-empty. If extraction
+    # is too incomplete to create any 1.80+ market, report an input problem rather
+    # than mislabeling the match as NO BET.
+    if not pool:
+        return {
+            "version": V13_VERSION, "status": "NEED_INPUT", "tip": None,
+            "ranked_candidates": ranked[:10], "deepseek_audit": audit,
+            "reliability": reliability,
+            "gate_reasons": ["1.80+ Single Tip တည်ဆောက်ဖို့ match/market data မလုံလောက်ပါ။"],
+            "warnings": ["Input/extraction incomplete — this is not a NO BET decision"],
+        }
+
+    # 4) Probability is still king. When a reasonably safer 1.80+ group exists,
+    #    choose inside it; otherwise mandatory mode still returns the best available
+    #    1.80+ candidate with a lower grade.
+    safer = [c for c in pool if float(c.get("model_probability") or 0.0) >= 0.48]
     if safer:
         pool = safer
 
@@ -1149,35 +1167,46 @@ def build_v13_decision(extracted, research, probability, calibration):
         score += p * 0.035 - risk * 0.025
 
         if c.get("odds_estimated"):
-            # Hidden-market estimate is a private sanity check only. Prefer a
-            # plausible practical-return zone, but never display this estimate.
+            # Hidden-market estimate is private. We target the safest practical
+            # big-odd zone rather than blindly chasing 4.00+ prices.
             est = float(c.get("odds") or 0.0)
-            if 1.30 <= est <= 2.20:
-                score += 0.040
-            elif 1.20 <= est < 1.30:
-                score += 0.012
-            elif est and est < 1.20:
-                score -= 0.055
-            score -= 0.008  # small uncertainty cost for no real bookmaker quote
+            if est < 1.80:
+                return -999.0
+            if 1.80 <= est <= 2.20:
+                score += 0.060
+            elif est <= 2.60:
+                score += 0.045
+            elif est <= 3.00:
+                score += 0.022
+            elif est <= 4.00:
+                score -= 0.020
+            else:
+                score -= 0.070
+            score -= 0.012  # uncertainty cost for no real bookmaker quote
         else:
             actual = float(c.get("odds") or 0.0)
-            if actual < 1.20:
+            if actual < 1.80:
                 return -999.0
-            score += 0.030  # real-price confirmation
+            score += 0.038  # real-price confirmation
+            if 1.80 <= actual <= 2.40:
+                score += 0.030
+            elif actual <= 2.80:
+                score += 0.018
+            elif actual >= 4.00:
+                score -= 0.055
             if float(c.get("expected_value") or 0.0) > 0:
                 score += min(0.025, float(c["expected_value"]) * 0.08)
         return score
 
     best = max(pool, key=final_score)
 
-    # 3) Close-call rule: a visible 1.20+ real price can beat a derived market
-    #    only when its score is genuinely close. Otherwise keep the better model
-    #    thesis even though its bookmaker odds were not shown in the screenshot.
+    # 5) Close-call rule: a visible 1.80+ real quote gets preference only when its
+    #    football score is genuinely close to the derived alternative.
     if best.get("odds_estimated"):
         visible_practical = [
             c for c in pool
             if (not c.get("odds_estimated"))
-            and float(c.get("odds") or 0.0) >= 1.20
+            and float(c.get("odds") or 0.0) >= 1.80
             and c.get("model_supported")
         ]
         if visible_practical:
@@ -1185,13 +1214,15 @@ def build_v13_decision(extracted, research, probability, calibration):
             if final_score(best_visible) >= final_score(best) + 0.018:
                 best = best_visible
 
+    # Mandatory-tip policy: analyzable matches are never rejected by a quality gate.
+    # no_bet_gate is retained for backwards compatibility/diagnostics only.
     gate_reasons = no_bet_gate(best, extracted, research, audit)
     if gate_reasons:
         return {
-            "version": V13_VERSION, "status": "NO_BET", "tip": None,
+            "version": V13_VERSION, "status": "NEED_INPUT", "tip": None,
             "ranked_candidates": ranked[:10], "deepseek_audit": audit,
             "reliability": reliability, "gate_reasons": gate_reasons,
-            "warnings": ["Quality gate rejected the available prices/markets"],
+            "warnings": ["Input/extraction failure — not a NO BET quality decision"],
         }
 
     grade = _tip_grade(best)
@@ -1203,13 +1234,13 @@ def build_v13_decision(extracted, research, probability, calibration):
     if _competition_penalty(extracted) > 0:
         warnings.append("Friendly/lower-data competition — uncertainty penalty applied")
     if best["expected_value"] <= 0:
-        warnings.append("No robust positive-EV quoted option found — best supported model market selected")
+        warnings.append("Best available 1.80+ model-supported Single selected; positive EV is not guaranteed")
     if audit.get("contradiction"):
         warnings.append("DeepSeek found an evidence contradiction — confidence reduced")
 
     return {
         "version": V13_VERSION,
-        "status": "TIP_READY" if grade in {"A", "B+", "B"} else "CAUTION_TIP",
+        "status": "TIP_READY" if grade in {"A", "B+", "B"} else "FORCED_TIP",
         "tip": {**best, "grade": grade, "tip_mode": mode},
         "ranked_candidates": ranked[:10],
         "deepseek_audit": audit,
@@ -1261,6 +1292,9 @@ def format_v13_tip(result):
         odds = float(tip.get("odds") or 0.0)
         if odds > 1.0:
             odds_line = f"💰 Odds: {odds:.3f}\n"
+    else:
+        # Never fabricate a bookmaker quote. Tell the customer the acceptance floor.
+        odds_line = "💰 Accept Odds: 1.80+ only (check bookmaker)\n"
 
     return (
         "👑 SHWE OHH PRE-BET\n\n"
