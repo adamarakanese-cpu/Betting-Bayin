@@ -4,7 +4,7 @@ from deepseek_verifier import verify_model_context
 from performance_engine import apply_performance_feedback
 from intelligence_engine import apply_contextual_learning, apply_selection_intelligence, no_bet_gate
 
-V13_VERSION = "V20.1"
+V13_VERSION = "V20.2"
 
 
 def _f(v):
@@ -1074,19 +1074,24 @@ def rank_all_markets(extracted, probability, calibration, reliability, deepseek_
     return sorted(combined, key=lambda x: x["ranking_score"], reverse=True)
 
 def _tip_grade(candidate):
-    e = candidate["evidence_confidence"]
-    p = candidate["model_probability"]
-    ev = candidate["expected_value"]
-    if e >= 0.78 and p >= 0.70 and ev >= 0.015: return "A"
-    if e >= 0.58 and p >= 0.62 and ev >= -0.01: return "B+"
-    if p >= 0.58: return "B"
+    e = float(candidate.get("evidence_confidence") or 0.0)
+    p = float(candidate.get("independent_model_probability") or candidate.get("model_probability") or 0.0)
+    ev = float(candidate.get("independent_expected_value") or candidate.get("expected_value") or 0.0)
+    trap = float(candidate.get("bookie_trap_risk") or 0.0)
+    if e >= 0.78 and p >= 0.64 and ev >= 0.025 and trap <= 0.18: return "A"
+    if e >= 0.58 and p >= 0.54 and ev >= -0.015 and trap <= 0.30: return "B+"
+    if p >= 0.46 and ev >= -0.06 and trap <= 0.46: return "B"
     return "C"
 
 
 def _tip_mode(candidate, audit):
+    trap = float(candidate.get("bookie_trap_risk") or 0.0)
+    ind_ev = float(candidate.get("independent_expected_value") or 0.0)
+    if trap > 0.58:
+        return "FORCED-LEAST-TRAP"
     if audit.get("contradiction") or candidate["evidence_confidence"] < 0.35:
         return "LOW-CONFIDENCE"
-    if candidate["expected_value"] > 0 and candidate["edge"] > 0:
+    if ind_ev > 0:
         return "VALUE"
     return "SAFETY-FIRST"
 
@@ -1113,10 +1118,10 @@ def build_v13_decision(extracted, research, probability, calibration):
             "warnings": ["Input/extraction incomplete — this is not a NO BET decision"],
         }
 
-    # V20.1 FINAL SELECTOR — REAL ODDS FIRST, SAFE BIG ODD, SINGLE BET ONLY.
-    # 1) A customer-facing tip must use a REAL bookmaker quote whenever the uploaded
-    #    screenshot contains at least one readable 1.80+ candidate. Model-derived
-    #    markets are fallback-only and can never outrank a usable real 1.80+ quote.
+    # V20.2 FINAL SELECTOR — REAL ODDS FIRST + BOOKIE TRAP GUARD.
+    # The engine never claims a bookmaker intentionally manipulates a price.
+    # "Trap" here means a quote that is unattractive/suspicious versus our
+    # independent model after break-even, de-vigged market and risk analysis.
     visible_big = [
         c for c in ranked
         if (not c.get("odds_estimated"))
@@ -1124,27 +1129,45 @@ def build_v13_decision(extracted, research, probability, calibration):
         and not c.get("single_bet_ineligible")
     ]
 
-    # 2) Inside the visible 1.80+ set, prefer markets the football model can actually
-    #    price. If none is model-readable, mandatory-tip mode still chooses the best
-    #    real bookmaker option instead of inventing a hidden market.
     visible_supported = [c for c in visible_big if c.get("model_supported")]
+
     if visible_big:
-        pool = visible_supported or visible_big
+        base_real_pool = visible_supported or visible_big
+
+        # Tier A: price is broadly justified by our independent model.
+        safe_real = [
+            c for c in base_real_pool
+            if float(c.get("bookie_trap_risk") if c.get("bookie_trap_risk") is not None else 1.0) <= 0.36
+            and float(c.get("independent_expected_value") if c.get("independent_expected_value") is not None else -1.0) >= -0.04
+        ]
+
+        # Tier B: slightly imperfect price, still materially safer than obvious
+        # negative-EV / model-disagreement quotes.
+        watch_real = [
+            c for c in base_real_pool
+            if float(c.get("bookie_trap_risk") if c.get("bookie_trap_risk") is not None else 1.0) <= 0.56
+            and float(c.get("independent_expected_value") if c.get("independent_expected_value") is not None else -1.0) >= -0.12
+        ]
+
+        # Mandatory-tip invariant: if every 1.80+ quote looks bad, DO NOT skip.
+        # Choose the least trap-like real quote instead of blindly choosing the
+        # lowest odd or the bookmaker favourite.
+        pool = safe_real or watch_real or base_real_pool
     else:
-        # 3) Only when the screenshot exposes NO real 1.80+ quote may the engine use
-        #    a model-derived 1.80+ alternative. This preserves the no-skip/no-NO-BET
-        #    policy without pretending an estimated price is a bookmaker price.
+        # Only when no real 1.80+ quote is visible may a model-derived alternative
+        # be used. Estimated odds remain private and are never printed as real odds.
         derived_big = [
             c for c in ranked
             if c.get("odds_estimated")
             and float(c.get("odds") or 0.0) >= 1.80
             and not c.get("single_bet_ineligible")
         ]
-        pool = derived_big
+        safe_derived = [
+            c for c in derived_big
+            if float(c.get("bookie_trap_risk") if c.get("bookie_trap_risk") is not None else 1.0) <= 0.40
+        ]
+        pool = safe_derived or derived_big
 
-    # A valid football model should normally make the pool non-empty. If extraction
-    # is too incomplete to create any 1.80+ market, report an input problem rather
-    # than mislabeling the match as NO BET.
     if not pool:
         return {
             "version": V13_VERSION, "status": "NEED_INPUT", "tip": None,
@@ -1154,59 +1177,75 @@ def build_v13_decision(extracted, research, probability, calibration):
             "warnings": ["Input/extraction incomplete — this is not a NO BET decision"],
         }
 
-    # 4) Probability is still king. When a reasonably safer 1.80+ group exists,
-    #    choose inside it; otherwise mandatory mode still returns the best available
-    #    1.80+ candidate with a lower grade.
-    safer = [c for c in pool if float(c.get("model_probability") or 0.0) >= 0.48]
-    if safer:
-        pool = safer
-
     def final_score(c):
         score = float(c.get("selection_intelligence_score", c.get("ranking_score", 0.0)) or 0.0)
         p = float(c.get("model_probability") or 0.0)
+        independent_p = float(c.get("independent_model_probability") or p)
+        evidence = float(c.get("evidence_confidence") or 0.0)
+        ind_ev = float(c.get("independent_expected_value") or 0.0)
+        trap = float(c.get("bookie_trap_risk") or 0.0)
         risk = max(0.0, float(c.get("risk_penalty") or 0.0))
-        score += p * 0.035 - risk * 0.025
+        level = str(c.get("bookie_trap_level") or "HIGH")
+
+        # Price-safety dominates the final decision.  This prevents a bookmaker
+        # favourite with a bad break-even requirement from winning simply because
+        # its decimal odd sits near 1.80-2.00.
+        score += independent_p * 0.18 + p * 0.04 + evidence * 0.03
+        score += max(-0.12, min(0.12, ind_ev * 0.42))
+        score -= trap * 0.62
+        score -= risk * 0.035
+
+        if level == "LOW":
+            score += 0.085
+        elif level == "MEDIUM":
+            score += 0.025
+        elif level == "HIGH":
+            score -= 0.070
+        else:
+            score -= 0.160
+
+        if ind_ev >= 0.08:
+            score += 0.085
+        elif ind_ev >= 0.02:
+            score += 0.050
+        elif ind_ev >= -0.02:
+            score += 0.018
+        elif ind_ev < -0.15:
+            score -= 0.120
+        elif ind_ev < -0.08:
+            score -= 0.060
 
         if c.get("odds_estimated"):
-            # Hidden-market estimate is private. We target the safest practical
-            # big-odd zone rather than blindly chasing 4.00+ prices.
             est = float(c.get("odds") or 0.0)
             if est < 1.80:
                 return -999.0
-            if 1.80 <= est <= 2.20:
-                score += 0.060
-            elif est <= 2.60:
-                score += 0.045
-            elif est <= 3.00:
-                score += 0.022
-            elif est <= 4.00:
-                score -= 0.020
-            else:
-                score -= 0.070
-            score -= 0.012  # uncertainty cost for no real bookmaker quote
+            # Model-derived prices are fallback only and carry uncertainty.
+            score -= 0.030
+            if 1.80 <= est <= 2.60:
+                score += 0.025
+            elif est >= 4.0:
+                score -= 0.055
         else:
             actual = float(c.get("odds") or 0.0)
             if actual < 1.80:
                 return -999.0
-            score += 0.038  # real-price confirmation
-            if 1.80 <= actual <= 2.40:
-                score += 0.030
-            elif actual <= 2.80:
+            score += 0.030  # real price confirmation
+            # Do not blindly prefer the shortest qualifying odd.
+            if 1.80 <= actual <= 2.80:
                 score += 0.018
-            elif actual >= 4.00:
-                score -= 0.055
-            if float(c.get("expected_value") or 0.0) > 0:
-                score += min(0.025, float(c["expected_value"]) * 0.08)
+            elif actual >= 4.0:
+                score -= 0.040
+
+        if not c.get("model_supported"):
+            score -= 0.085
         return score
 
     best = max(pool, key=final_score)
 
-    # 5) Safety invariant: if any real 1.80+ quote was visible, the final tip must
-    #    also be real. This guards against later ranking changes accidentally allowing
-    #    a synthetic/hidden market to leak into customer output.
+    # Hard invariant: if at least one real 1.80+ quote exists, final output must be
+    # one of those real quotes. Derived markets may inform analysis but cannot leak.
     if visible_big and best.get("odds_estimated"):
-        real_guard_pool = visible_supported or visible_big
-        best = max(real_guard_pool, key=final_score)
+        best = max(visible_supported or visible_big, key=final_score)
 
     # Mandatory-tip policy: analyzable matches are never rejected by a quality gate.
     # no_bet_gate is retained for backwards compatibility/diagnostics only.
@@ -1227,8 +1266,10 @@ def build_v13_decision(extracted, research, probability, calibration):
         warnings.append("Sparse/low-quality evidence — market consensus weighting increased")
     if _competition_penalty(extracted) > 0:
         warnings.append("Friendly/lower-data competition — uncertainty penalty applied")
-    if best["expected_value"] <= 0:
-        warnings.append("Best available 1.80+ model-supported Single selected; positive EV is not guaranteed")
+    if float(best.get("bookie_trap_risk") or 0.0) > 0.58:
+        warnings.append("All visible 1.80+ options were high price-risk; least trap-like Single selected")
+    elif float(best.get("independent_expected_value") or 0.0) < -0.04:
+        warnings.append("Best available 1.80+ quote still has model price-risk; least-risk Single selected")
     if audit.get("contradiction"):
         warnings.append("DeepSeek found an evidence contradiction — confidence reduced")
 

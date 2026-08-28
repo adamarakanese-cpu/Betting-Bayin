@@ -168,12 +168,106 @@ def _price_quality_adjustment(odds):
 
 
 
-def apply_selection_intelligence(candidates, extracted=None, research=None, audit=None):
-    """V20 SAFE BIG ODD single-bet selector.
 
-    The final target is one actionable Single Bet with an internal/real price >=1.80.
-    Within that price floor, probability, evidence quality and risk remain more important
-    than raw odds. Weak matches are not converted to NO BET; they receive lower grades.
+def _bookie_trap_metrics(candidate):
+    """Estimate whether a bookmaker price is unattractive for OUR model.
+
+    This does not claim intentional manipulation.  It compares the independent
+    football-model probability with the quoted break-even probability and the
+    de-vigged market probability.  The result is used as a strong price-risk
+    penalty, never as a reason to skip the match.
+    """
+    odds = float(candidate.get("odds") or 0.0)
+    push = _clamp(candidate.get("push_probability") or 0.0, 0.0, 0.90)
+    supported = bool(candidate.get("model_supported"))
+
+    independent_p = candidate.get("raw_model_probability")
+    if independent_p is None:
+        independent_p = candidate.get("model_probability")
+    independent_p = _clamp(independent_p or 0.5, 0.005, 0.995)
+
+    market_p = candidate.get("market_probability")
+    market_p = None if market_p is None else _clamp(market_p, 0.005, 0.995)
+    evidence = _clamp(candidate.get("evidence_confidence") or 0.0, 0.0, 1.0)
+    base_risk = max(0.0, float(candidate.get("risk_penalty") or 0.0))
+
+    if odds <= 1.0:
+        return {
+            "independent_model_probability": independent_p,
+            "bookmaker_break_even_probability": 0.995,
+            "independent_expected_value": -1.0,
+            "model_market_gap": None,
+            "model_fair_odds": None,
+            "bookie_trap_risk": 1.0,
+            "bookie_trap_level": "HIGH",
+        }
+
+    break_even = _clamp((1.0 - push) / odds, 0.005, 0.995)
+    independent_ev = independent_p * odds + push - 1.0
+    fair_odds = max(1.01, (1.0 - push) / max(independent_p, 0.005))
+    gap = None if market_p is None else independent_p - market_p
+    overpriced_gap = max(0.0, break_even - independent_p)
+
+    # Strongest signal: our independent probability cannot cover the offered price.
+    trap = 0.0
+    if independent_ev < 0.0:
+        trap += min(0.42, -independent_ev * 1.55)
+    if independent_ev < -0.08:
+        trap += min(0.18, (-independent_ev - 0.08) * 0.85)
+    trap += min(0.28, overpriced_gap * 2.20)
+
+    # A de-vigged bookmaker consensus materially above our model can mean the
+    # attractive-looking side is actually too expensive for our view of the game.
+    if gap is not None and gap < -0.035:
+        trap += min(0.20, (-gap - 0.035) * 1.45)
+
+    # Huge model/market disagreement in sparse evidence is dangerous in either
+    # direction: it may be value, but it may also be model misspecification.
+    if gap is not None and abs(gap) > 0.14 and evidence < 0.60:
+        trap += min(0.12, (abs(gap) - 0.14) * 0.70)
+
+    if not supported:
+        trap += 0.16
+    if evidence < 0.35:
+        trap += 0.08
+    elif evidence < 0.50:
+        trap += 0.035
+
+    # Existing family/competition/longshot risk still matters.
+    trap += min(0.16, base_risk * 0.42)
+    if odds >= 5.0:
+        trap += 0.10
+    elif odds >= 4.0:
+        trap += 0.06
+    elif odds >= 3.2:
+        trap += 0.025
+
+    trap = _clamp(trap, 0.0, 1.0)
+    if trap <= 0.18 and independent_ev >= -0.02:
+        level = "LOW"
+    elif trap <= 0.36 and independent_ev >= -0.08:
+        level = "MEDIUM"
+    elif trap <= 0.58:
+        level = "HIGH"
+    else:
+        level = "VERY_HIGH"
+
+    return {
+        "independent_model_probability": independent_p,
+        "bookmaker_break_even_probability": break_even,
+        "independent_expected_value": independent_ev,
+        "model_market_gap": gap,
+        "model_fair_odds": fair_odds,
+        "bookie_trap_risk": trap,
+        "bookie_trap_level": level,
+    }
+
+def apply_selection_intelligence(candidates, extracted=None, research=None, audit=None):
+    """V20.2 SAFE BIG ODD selector with bookmaker-price trap protection.
+
+    Every analyzable match still produces one Single Tip.  1.80+ remains a hard
+    price floor, but the engine now strongly prefers prices our independent model
+    can justify after de-vigging and break-even analysis.
     """
     audit = audit or {}
     out = []
@@ -188,6 +282,12 @@ def apply_selection_intelligence(candidates, extracted=None, research=None, audi
         risk = max(0.0, float(c.get("risk_penalty") or 0.0))
         supported = bool(c.get("model_supported"))
 
+        trap_metrics = _bookie_trap_metrics(c)
+        c.update(trap_metrics)
+        independent_p = float(c.get("independent_model_probability") or p)
+        independent_ev = float(c.get("independent_expected_value") or 0.0)
+        trap_risk = float(c.get("bookie_trap_risk") or 0.0)
+
         # Accuracy remains first. The price floor is a constraint, not a reason to
         # chase the highest odd. This deliberately favors the safest 1.80+ option.
         score = p * 0.620 + evidence * 0.150
@@ -201,6 +301,14 @@ def apply_selection_intelligence(candidates, extracted=None, research=None, audi
             score += min(0.035, win_profit_mass * 0.10)
 
         score += _price_quality_adjustment(odds)
+
+        # V20.2 BOOKIE TRAP GUARD.  The independent football model, not the
+        # bookmaker-anchored probability, decides whether a price is suspicious.
+        # A negative independent EV or a large break-even gap is heavily demoted.
+        score += max(-0.085, min(0.060, independent_ev * 0.34))
+        score += max(-0.030, min(0.030, (independent_p - p) * 0.15))
+        score -= trap_risk * 0.34
+
         # Real bookmaker confirmation is useful, but derived markets remain valid
         # when the screenshot does not expose a suitable 1.80+ quote.
         score += 0.024 if not c.get("odds_estimated") else -0.018
@@ -244,7 +352,7 @@ def apply_selection_intelligence(candidates, extracted=None, research=None, audi
         c["market_thesis"] = _candidate_thesis(c)
         c["price_quality_adjustment"] = _price_quality_adjustment(odds)
         c["selection_intelligence_score"] = score
-        c["selection_intelligence_version"] = "V20.1"
+        c["selection_intelligence_version"] = "V20.2"
         out.append(c)
 
     if not out:
@@ -252,9 +360,12 @@ def apply_selection_intelligence(candidates, extracted=None, research=None, audi
 
     def safety_score(c):
         return (
-            float(c.get("model_probability") or 0.0) * 0.76
+            float(c.get("independent_model_probability") or c.get("model_probability") or 0.0) * 0.60
+            + float(c.get("model_probability") or 0.0) * 0.16
             + float(c.get("evidence_confidence") or 0.0) * 0.15
-            - max(0.0, float(c.get("risk_penalty") or 0.0)) * 0.09
+            + max(-0.05, min(0.05, float(c.get("independent_expected_value") or 0.0) * 0.16))
+            - max(0.0, float(c.get("risk_penalty") or 0.0)) * 0.07
+            - float(c.get("bookie_trap_risk") or 0.0) * 0.24
             + (0.025 if c.get("model_supported") else -0.020)
         )
 
