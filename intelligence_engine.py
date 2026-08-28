@@ -244,7 +244,7 @@ def apply_selection_intelligence(candidates, extracted=None, research=None, audi
         c["market_thesis"] = _candidate_thesis(c)
         c["price_quality_adjustment"] = _price_quality_adjustment(odds)
         c["selection_intelligence_score"] = score
-        c["selection_intelligence_version"] = "V20.0"
+        c["selection_intelligence_version"] = "V20.1"
         out.append(c)
 
     if not out:

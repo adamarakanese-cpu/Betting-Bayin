@@ -4,7 +4,7 @@ from deepseek_verifier import verify_model_context
 from performance_engine import apply_performance_feedback
 from intelligence_engine import apply_contextual_learning, apply_selection_intelligence, no_bet_gate
 
-V13_VERSION = "V20.0"
+V13_VERSION = "V20.1"
 
 
 def _f(v):
@@ -1113,31 +1113,32 @@ def build_v13_decision(extracted, research, probability, calibration):
             "warnings": ["Input/extraction incomplete — this is not a NO BET decision"],
         }
 
-    # V20 FINAL SELECTOR — SAFE BIG ODD, SINGLE BET ONLY.
-    # 1) 1.80 is a hard final floor for both real screenshot odds and private
-    #    model-derived price estimates. Sub-1.80 selections may guide the thesis,
-    #    but can never be the customer-facing final pick.
-    big_odd_pool = [
+    # V20.1 FINAL SELECTOR — REAL ODDS FIRST, SAFE BIG ODD, SINGLE BET ONLY.
+    # 1) A customer-facing tip must use a REAL bookmaker quote whenever the uploaded
+    #    screenshot contains at least one readable 1.80+ candidate. Model-derived
+    #    markets are fallback-only and can never outrank a usable real 1.80+ quote.
+    visible_big = [
         c for c in ranked
-        if float(c.get("odds") or 0.0) >= 1.80
+        if (not c.get("odds_estimated"))
+        and float(c.get("odds") or 0.0) >= 1.80
         and not c.get("single_bet_ineligible")
     ]
 
-    # 2) Prefer model-supported candidates, but never throw away every valid 1.80+
-    #    option merely because a market family is not model-readable. This preserves
-    #    mandatory-tip behavior for unusual bookmaker screens.
-    supported_big = [c for c in big_odd_pool if c.get("model_supported")]
-    pool = supported_big or big_odd_pool
-
-    # 3) If ranking produced candidates but none clears 1.80, do not silently return
-    #    NO BET. Prefer a derived 1.80+ alternative from the complete ranked list.
-    #    In normal model runs this branch is rarely needed because derived handicap,
-    #    combo and half markets cover the return zone broadly.
-    if not pool:
+    # 2) Inside the visible 1.80+ set, prefer markets the football model can actually
+    #    price. If none is model-readable, mandatory-tip mode still chooses the best
+    #    real bookmaker option instead of inventing a hidden market.
+    visible_supported = [c for c in visible_big if c.get("model_supported")]
+    if visible_big:
+        pool = visible_supported or visible_big
+    else:
+        # 3) Only when the screenshot exposes NO real 1.80+ quote may the engine use
+        #    a model-derived 1.80+ alternative. This preserves the no-skip/no-NO-BET
+        #    policy without pretending an estimated price is a bookmaker price.
         derived_big = [
             c for c in ranked
             if c.get("odds_estimated")
             and float(c.get("odds") or 0.0) >= 1.80
+            and not c.get("single_bet_ineligible")
         ]
         pool = derived_big
 
@@ -1200,19 +1201,12 @@ def build_v13_decision(extracted, research, probability, calibration):
 
     best = max(pool, key=final_score)
 
-    # 5) Close-call rule: a visible 1.80+ real quote gets preference only when its
-    #    football score is genuinely close to the derived alternative.
-    if best.get("odds_estimated"):
-        visible_practical = [
-            c for c in pool
-            if (not c.get("odds_estimated"))
-            and float(c.get("odds") or 0.0) >= 1.80
-            and c.get("model_supported")
-        ]
-        if visible_practical:
-            best_visible = max(visible_practical, key=final_score)
-            if final_score(best_visible) >= final_score(best) + 0.018:
-                best = best_visible
+    # 5) Safety invariant: if any real 1.80+ quote was visible, the final tip must
+    #    also be real. This guards against later ranking changes accidentally allowing
+    #    a synthetic/hidden market to leak into customer output.
+    if visible_big and best.get("odds_estimated"):
+        real_guard_pool = visible_supported or visible_big
+        best = max(real_guard_pool, key=final_score)
 
     # Mandatory-tip policy: analyzable matches are never rejected by a quality gate.
     # no_bet_gate is retained for backwards compatibility/diagnostics only.
