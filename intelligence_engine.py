@@ -1,4 +1,4 @@
-"""V20.3 OPEN MARKET UNIVERSE intelligence layer.
+"""V20.4 PRICE REALITY intelligence layer.
 
 Adds bounded, sample-gated league/team outcome memory and a mandatory best-available-tip policy.
 It does not add network calls and therefore does not alter the V18 speed path.
@@ -202,10 +202,13 @@ def _bookie_trap_metrics(candidate):
         fair_odds = max(1.01, (1.0 - push) / max(independent_p, 0.005))
         uncertainty = (1.0 - evidence) * 0.24 + min(0.22, base_risk * 0.42)
         availability = str(candidate.get("price_availability") or "CHECK_PRICE")
-        if availability == "CHECK_PRICE":
-            uncertainty += 0.06
+        actionable = bool(candidate.get("price_actionable"))
+        reality = _clamp(candidate.get("price_reality_score") or 0.0, 0.0, 1.0)
+        if not actionable:
+            uncertainty += 0.18
         elif availability == "POSSIBLE":
-            uncertainty += 0.025
+            uncertainty += 0.035
+        uncertainty += (1.0 - reality) * 0.10
         if independent_p < 0.46:
             uncertainty += 0.10
         elif independent_p < 0.50:
@@ -215,7 +218,10 @@ def _bookie_trap_metrics(candidate):
         return {
             "independent_model_probability": independent_p,
             "bookmaker_break_even_probability": break_even,
-            "independent_expected_value": threshold_ev,
+            # No real quote exists yet. A positive EV at the Take Odds threshold is
+            # circular and must not reward ranking. Keep it separately for audit.
+            "independent_expected_value": 0.0,
+            "threshold_expected_value": threshold_ev,
             "model_market_gap": None,
             "model_fair_odds": fair_odds,
             "bookie_trap_risk": trap,
@@ -327,12 +333,17 @@ def apply_selection_intelligence(candidates, extracted=None, research=None, audi
         score += max(-0.018, min(0.018, edge * 0.09))
         score -= min(0.115, risk * 0.16)
 
-        if odds > 1.0:
-            # Small value reward only; raw return must never overwhelm hit probability.
+        if not c.get("odds_estimated") and odds > 1.0:
+            # Only a REAL bookmaker quote may earn a price/value bonus. A derived
+            # Take Odds threshold is not a price and must never behave like one.
             win_profit_mass = p * (odds - 1.0)
             score += min(0.035, win_profit_mass * 0.10)
-
-        score += _price_quality_adjustment(odds)
+            score += _price_quality_adjustment(odds)
+        elif c.get("odds_estimated"):
+            reality = _clamp(c.get("price_reality_score") or 0.0, 0.0, 1.0)
+            score += (reality - 0.50) * 0.08
+            if not c.get("price_actionable"):
+                score -= 0.20
 
         # V20.2 BOOKIE TRAP GUARD.  The independent football model, not the
         # bookmaker-anchored probability, decides whether a price is suspicious.
@@ -341,16 +352,18 @@ def apply_selection_intelligence(candidates, extracted=None, research=None, audi
         score += max(-0.030, min(0.030, (independent_p - p) * 0.15))
         score -= trap_risk * 0.34
 
-        # V20.3 removes screenshot-first bias. Real price confirmation is only a
-        # small bonus; outside markets are not automatically demoted.
+        # V20.4 keeps the open market universe, but an outside market must have
+        # a realistic path to its required Take Odds. No synthetic-price bonus.
         if not c.get("odds_estimated"):
             score += 0.012 if independent_ev >= -0.02 else -0.010
         else:
             availability = str(c.get("price_availability") or "CHECK_PRICE")
             if availability == "LIKELY":
                 score += 0.014
-            elif availability == "CHECK_PRICE":
-                score -= 0.018
+            elif availability == "POSSIBLE":
+                score += 0.004
+            else:
+                score -= 0.080
 
         # V19.5 broad score-model support gets the same trust treatment as familiar
         # families; bookmaker-anchor-only markets stay eligible but carry uncertainty.
@@ -387,9 +400,9 @@ def apply_selection_intelligence(candidates, extracted=None, research=None, audi
         c["safe_big_odd_eligible"] = bool(odds >= 1.80)
 
         c["market_thesis"] = _candidate_thesis(c)
-        c["price_quality_adjustment"] = _price_quality_adjustment(odds)
+        c["price_quality_adjustment"] = 0.0 if c.get("odds_estimated") else _price_quality_adjustment(odds)
         c["selection_intelligence_score"] = score
-        c["selection_intelligence_version"] = "V20.3"
+        c["selection_intelligence_version"] = "V20.4"
         out.append(c)
 
     if not out:

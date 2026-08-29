@@ -4,7 +4,7 @@ from deepseek_verifier import verify_model_context
 from performance_engine import apply_performance_feedback
 from intelligence_engine import apply_contextual_learning, apply_selection_intelligence, no_bet_gate
 
-V13_VERSION = "V20.3"
+V13_VERSION = "V20.4"
 
 
 def _f(v):
@@ -1039,32 +1039,44 @@ def _hidden_model_candidates(extracted, probability, calibration, reliability, d
         elif min_take >= 2.25:
             risk += 0.035
 
-        # Probability + evidence dominate. Availability is estimated only to avoid
-        # repeatedly recommending a threshold that a bookmaker is very unlikely to
-        # offer for this market. No estimated quote is ever shown as a real quote.
-        score = p * 0.66 + evidence * 0.18 - risk * 0.19
-        if min_take <= 2.05:
-            score += 0.060
-        elif min_take <= 2.40:
-            score += 0.038
-        elif min_take <= 2.80:
-            score += 0.018
-        elif min_take >= 4.0:
-            score -= 0.090
+        # V20.4 PRICE REALITY FIX:
+        # The minimum Take Odds is a VALUE THRESHOLD, not an observed price.
+        # V20.3 accidentally ranked that threshold almost like a real quote. That
+        # structurally favoured very-safe outside lines (especially Team Total
+        # Under 2.5) because many of them were assigned the same 1.80 threshold.
+        # We now rank an outside market by how plausible it is that a bookmaker
+        # could actually offer the required price.
+        center_ratio = est_center / max(min_take, 1.01)
+        high_ratio = est_high / max(min_take, 1.01)
+        price_actionable = bool(est_high >= min_take and center_ratio >= 0.90)
+        price_reality_score = _clamp((center_ratio - 0.82) / 0.14, 0.0, 1.0)
 
-        if est_center >= min_take:
-            score += 0.050
+        if price_actionable and center_ratio >= 0.94:
             availability = "LIKELY"
-        elif est_high >= min_take:
-            score += 0.020
+        elif price_actionable:
             availability = "POSSIBLE"
         else:
-            gap = min_take - est_high
-            score -= min(0.150, 0.050 + gap * 0.10)
             availability = "CHECK_PRICE"
 
+        # Probability/evidence still lead, but there is NO bonus simply because
+        # min_take happened to floor at 1.80. Unverified outside prices must earn
+        # their place through realistic price overlap.
+        score = p * 0.60 + evidence * 0.18 - risk * 0.19
+        score += price_reality_score * 0.055
+        if price_actionable:
+            score += 0.035 if availability == "LIKELY" else 0.018
+        else:
+            gap = max(0.0, min_take - est_high)
+            score -= min(0.260, 0.120 + gap * 0.22 + max(0.0, 0.90 - center_ratio) * 0.35)
+            risk += min(0.10, max(0.0, 0.90 - center_ratio) * 0.45)
+
+        if min_take >= 4.0:
+            score -= 0.090
+        elif min_take >= 3.0:
+            score -= 0.045
+
         if push_p > 0:
-            score += min(0.030, push_p * 0.11)
+            score += min(0.025, push_p * 0.09)
 
         out.append({
             "market_name": _strip_period_display(market_name) or market_name,
@@ -1081,14 +1093,20 @@ def _hidden_model_candidates(extracted, probability, calibration, reliability, d
             "estimated_odds_high": est_high,
             "estimated_odds_center": est_center,
             "price_availability": availability,
-            "price_actionable": bool(est_high >= min_take * 0.94),
+            "price_actionable": price_actionable,
+            "price_reality_score": price_reality_score,
+            "price_center_ratio": center_ratio,
+            "price_high_ratio": high_ratio,
             "odds_estimated": True,
             "price_mode": "minimum_threshold",
             "raw_model_probability": raw_p,
             "model_probability": p,
             "market_probability": None,
             "edge": 0.0,
-            "expected_value": threshold_ev,
+            # A positive EV at min_take is true by construction, so it must NOT
+            # be used as ranking evidence before we know a real bookmaker quote.
+            "expected_value": 0.0,
+            "threshold_expected_value": threshold_ev,
             "push_probability": push_p,
             "risk_penalty": risk,
             "ranking_score": score,
@@ -1200,7 +1218,17 @@ def build_v13_decision(extracted, research, probability, calibration):
         if c.get("odds_estimated") and not c.get("price_actionable"):
             continue
         quality_pool.append(c)
-    pool = quality_pool or base_pool
+    if quality_pool:
+        pool = quality_pool
+    else:
+        # If no high-quality candidate survives, prefer a REAL 1xBet 1.80+ quote
+        # over an outside market whose price is still unverified. This preserves
+        # the mandatory-tip rule without pretending a Take Odds threshold exists.
+        real_fallback = [
+            c for c in base_pool
+            if not c.get("odds_estimated") and float(c.get("odds") or 0.0) >= 1.80
+        ]
+        pool = real_fallback or base_pool
 
     def final_score(c):
         p = float(c.get("model_probability") or 0.0)
