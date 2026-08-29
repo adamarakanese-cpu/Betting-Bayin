@@ -1,4 +1,4 @@
-"""V20 SAFE BIG ODD intelligence layer.
+"""V20.3 OPEN MARKET UNIVERSE intelligence layer.
 
 Adds bounded, sample-gated league/team outcome memory and a mandatory best-available-tip policy.
 It does not add network calls and therefore does not alter the V18 speed path.
@@ -191,6 +191,38 @@ def _bookie_trap_metrics(candidate):
     evidence = _clamp(candidate.get("evidence_confidence") or 0.0, 0.0, 1.0)
     base_risk = max(0.0, float(candidate.get("risk_penalty") or 0.0))
 
+    # Model-derived/outside markets do not have a real bookmaker quote yet. Their
+    # "odds" field is the minimum take threshold, so do NOT call it a bookmaker
+    # trap. Score price-threshold safety from probability/evidence/risk instead.
+    if candidate.get("odds_estimated"):
+        if odds <= 1.0:
+            odds = float(candidate.get("minimum_acceptable_odds") or 1.80)
+        break_even = _clamp((1.0 - push) / odds, 0.005, 0.995)
+        threshold_ev = independent_p * odds + push - 1.0
+        fair_odds = max(1.01, (1.0 - push) / max(independent_p, 0.005))
+        uncertainty = (1.0 - evidence) * 0.24 + min(0.22, base_risk * 0.42)
+        availability = str(candidate.get("price_availability") or "CHECK_PRICE")
+        if availability == "CHECK_PRICE":
+            uncertainty += 0.06
+        elif availability == "POSSIBLE":
+            uncertainty += 0.025
+        if independent_p < 0.46:
+            uncertainty += 0.10
+        elif independent_p < 0.50:
+            uncertainty += 0.05
+        trap = _clamp(uncertainty, 0.0, 1.0)
+        level = "LOW" if trap <= 0.18 else ("MEDIUM" if trap <= 0.36 else ("HIGH" if trap <= 0.58 else "VERY_HIGH"))
+        return {
+            "independent_model_probability": independent_p,
+            "bookmaker_break_even_probability": break_even,
+            "independent_expected_value": threshold_ev,
+            "model_market_gap": None,
+            "model_fair_odds": fair_odds,
+            "bookie_trap_risk": trap,
+            "bookie_trap_level": level,
+            "price_threshold_only": True,
+        }
+
     if odds <= 1.0:
         return {
             "independent_model_probability": independent_p,
@@ -263,11 +295,11 @@ def _bookie_trap_metrics(candidate):
     }
 
 def apply_selection_intelligence(candidates, extracted=None, research=None, audit=None):
-    """V20.2 SAFE BIG ODD selector with bookmaker-price trap protection.
+    """V20.3 open-market selector with independent-model price protection.
 
-    Every analyzable match still produces one Single Tip.  1.80+ remains a hard
-    price floor, but the engine now strongly prefers prices our independent model
-    can justify after de-vigging and break-even analysis.
+    Screenshot quotes and outside/model-derived markets compete on one safety scale.
+    A real quote must clear 1.80; an outside market carries a calculated minimum
+    take threshold and may win even when real 1.80+ screenshot quotes exist.
     """
     audit = audit or {}
     out = []
@@ -309,9 +341,16 @@ def apply_selection_intelligence(candidates, extracted=None, research=None, audi
         score += max(-0.030, min(0.030, (independent_p - p) * 0.15))
         score -= trap_risk * 0.34
 
-        # Real bookmaker confirmation is useful, but derived markets remain valid
-        # when the screenshot does not expose a suitable 1.80+ quote.
-        score += 0.024 if not c.get("odds_estimated") else -0.018
+        # V20.3 removes screenshot-first bias. Real price confirmation is only a
+        # small bonus; outside markets are not automatically demoted.
+        if not c.get("odds_estimated"):
+            score += 0.012 if independent_ev >= -0.02 else -0.010
+        else:
+            availability = str(c.get("price_availability") or "CHECK_PRICE")
+            if availability == "LIKELY":
+                score += 0.014
+            elif availability == "CHECK_PRICE":
+                score -= 0.018
 
         # V19.5 broad score-model support gets the same trust treatment as familiar
         # families; bookmaker-anchor-only markets stay eligible but carry uncertainty.
@@ -336,11 +375,9 @@ def apply_selection_intelligence(candidates, extracted=None, research=None, audi
         if audit.get("contradiction"):
             score -= 0.025 + (1.0 - evidence) * 0.030
 
-        # V20 HARD FLOOR: both real quotes and private derived-price estimates must
-        # clear 1.80 before they can become the final SAFE BIG ODD Single Tip.
-        # Sub-1.80 candidates stay in diagnostics because they can identify the safest
-        # football thesis and help us upgrade to a nearby 1.80+ market.
-        if 1.0 < odds < 1.80:
+        # Hard product floor. For outside markets `odds` is a model TAKE threshold,
+        # not a fabricated quote. For real screenshot markets it is the actual quote.
+        if odds < 1.80:
             c["single_bet_ineligible"] = True
             c["single_bet_ineligible_reason"] = "ODDS_BELOW_1_80"
             score -= 1.0
@@ -352,7 +389,7 @@ def apply_selection_intelligence(candidates, extracted=None, research=None, audi
         c["market_thesis"] = _candidate_thesis(c)
         c["price_quality_adjustment"] = _price_quality_adjustment(odds)
         c["selection_intelligence_score"] = score
-        c["selection_intelligence_version"] = "V20.2"
+        c["selection_intelligence_version"] = "V20.3"
         out.append(c)
 
     if not out:
@@ -375,7 +412,7 @@ def apply_selection_intelligence(candidates, extracted=None, research=None, audi
     leader_ev = float(leader.get("expected_value") or 0.0)
     thesis = leader.get("market_thesis")
 
-    if leader_odds and leader_odds < 1.80:
+    if leader_odds and leader_odds < 1.80 and not leader.get("odds_estimated"):
         # The safest raw thesis may be a short-priced market. Upgrade to a nearby
         # expression of the same idea that clears 1.80 without sacrificing too much
         # model probability.
