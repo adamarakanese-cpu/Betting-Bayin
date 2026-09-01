@@ -10,7 +10,6 @@ import time
 import hashlib
 import copy
 import httpx
-import psycopg
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -57,7 +56,7 @@ from match_reconcile import reconcile_album_extractions
 
 
 # =========================================================
-# SHWE OHH V18.0 SPEED ROUTER
+# SHWE OHH V20.5 PREBET STATE GUARD
 # TELEGRAM BOT + FULL AI PIPELINE + RENDER HEALTH SERVER
 # =========================================================
 
@@ -74,7 +73,6 @@ ADMIN_USER_IDS_RAW = os.getenv("ADMIN_USER_IDS", "").strip()
 ADMIN_USERNAME_RAW = os.getenv("ADMIN_USERNAME", "shweohh_admin").strip()
 VISION_MODEL = os.getenv("VISION_MODEL", "qwen/qwen3.6-27b")
 PORT = int(os.getenv("PORT", "10000"))
-DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
 if not GROQ_API_KEY:
     raise RuntimeError("GROQ_API_KEY မတွေ့ပါ")
@@ -124,6 +122,11 @@ STRICT RULES:
 14. Do not output markdown.
 15. Do not output explanations.
 16. Do not output <think> tags.
+17. PRE-MATCH CLASSIFICATION IS CRITICAL: if the screenshot visibly says "Pre-match betting", "Pre-match", "Prematch", "Starts in", or shows a scheduled future kickoff date/time, classify it as PRE-MATCH.
+18. A pre-match screen may display "(0-0), Pre-match betting". The 0-0 there is NOT a live score. Do not set live.is_live=true for that.
+19. Never interpret a countdown such as "Starts in 00:03" or "Starts in 49:23" as a live match minute.
+20. Set live.is_live=true only when the match is actually in play and the screenshot shows strong live evidence such as "Time elapsed", a running match minute, 1st-half/2nd-half live state, halftime, or an in-play score.
+21. Set match_type to exactly one of: "pre_match", "live", or "unknown". If an explicit pre-match signal is visible, it overrides a displayed 0-0.
 
 Return exactly:
 
@@ -161,54 +164,6 @@ Return exactly:
 
 
 # =========================================================
-# SINGLE TELEGRAM POLLER LOCK
-# Prevent Render rolling deploy overlap from starting two getUpdates loops.
-# The lock is PostgreSQL-backed and is released automatically when a process exits.
-# =========================================================
-
-_POLLING_LOCK_CONN = None
-
-def acquire_single_poller_lock():
-    global _POLLING_LOCK_CONN
-
-    if not DATABASE_URL:
-        print("⚠️ DATABASE_URL missing — single-poller lock disabled")
-        return None
-
-    # Stable positive 63-bit advisory-lock key unique to this Telegram bot token.
-    digest = hashlib.sha256(f"shwe-ohh-poller:{TELEGRAM_BOT_TOKEN}".encode("utf-8")).digest()
-    lock_id = int.from_bytes(digest[:8], "big") & 0x7FFFFFFFFFFFFFFF
-
-    waiting_logged = False
-    while True:
-        conn = None
-        try:
-            conn = psycopg.connect(DATABASE_URL, autocommit=True, connect_timeout=10)
-            with conn.cursor() as cur:
-                cur.execute("SELECT pg_try_advisory_lock(%s)", (lock_id,))
-                acquired = bool(cur.fetchone()[0])
-
-            if acquired:
-                _POLLING_LOCK_CONN = conn
-                print("🔒 Telegram single-poller lock acquired")
-                return conn
-
-            conn.close()
-            if not waiting_logged:
-                print("⏳ Previous Render instance is still polling; waiting for clean handover...")
-                waiting_logged = True
-        except Exception as error:
-            if conn is not None:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-            print(f"⚠️ Poller-lock retry: {type(error).__name__}: {error}")
-
-        time.sleep(2.0)
-
-
-# =========================================================
 # RENDER HEALTH SERVER
 # =========================================================
 
@@ -218,7 +173,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             payload = {
                 "ok": True,
                 "service": "Shwe Ohh",
-                "version": "V18.0 SPEED ROUTER",
+                "version": "V20.5 PREBET STATE GUARD",
                 "telegram_polling": True,
             }
             body = json.dumps(payload).encode("utf-8")
@@ -239,7 +194,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             body = json.dumps({
                 "ok": True,
                 "service": "Shwe Ohh",
-                "version": "V18.0 SPEED ROUTER",
+                "version": "V20.5 PREBET STATE GUARD",
                 "telegram_polling": True,
             }).encode("utf-8")
             self.send_response(200)
@@ -1189,11 +1144,118 @@ def _match_group_key(extracted, fallback_index):
     return ("__unknown__", str(fallback_index))
 
 
-async def _process_extracted_match(update, context, user, extracted):
-    # Final Pre-Bet release: never analyze a live screenshot as pre-match.
+def _normalize_match_type_text(value):
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").strip().lower()).strip()
+
+
+def _extract_numeric_minute(value):
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return float(value)
+        except Exception:
+            return None
+    text = str(value).strip().lower()
+    # Countdown-like clock values are not trusted as live minutes by themselves.
+    if ":" in text:
+        return None
+    m = re.search(r"(?<!\d)(\d{1,3})(?:st|nd|rd|th)?\s*'?", text)
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except Exception:
+        return None
+
+
+def _classify_extracted_match_state(extracted):
+    """Return pre_match/live/unknown using conservative, explicit evidence.
+
+    Vision models occasionally misread a pre-match countdown or the text
+    "(0-0), Pre-match betting" as a live score.  For the PRE-BET bot, explicit
+    bookmaker pre-match signals must override that false positive.
+    """
+    extracted = extracted or {}
     live = extracted.get("live", {}) or {}
-    match_type = str(extracted.get("match_type") or "").strip().lower()
-    if bool(live.get("is_live")) or "live" in match_type:
+    match_type = _normalize_match_type_text(extracted.get("match_type"))
+
+    pre_tokens = (
+        "pre match", "prematch", "pre bet", "prebet",
+        "before match", "pre match betting", "pre betting",
+    )
+    live_tokens = (
+        "live", "in play", "inplay", "time elapsed",
+        "1st half", "first half", "2nd half", "second half", "halftime",
+    )
+
+    explicit_pre = any(token in match_type for token in pre_tokens)
+    explicit_live = any(token in match_type for token in live_tokens) and not explicit_pre
+
+    start_date = str(extracted.get("start_date") or "").strip()
+    start_time = str(extracted.get("start_time") or "").strip()
+    scheduled_kickoff_visible = bool(start_date or start_time)
+
+    minute = _extract_numeric_minute(live.get("minute"))
+    score = str(live.get("score") or "").strip()
+    score_match = re.fullmatch(r"\s*(\d{1,2})\s*[-:]\s*(\d{1,2})\s*", score)
+    nonzero_score = False
+    if score_match:
+        nonzero_score = int(score_match.group(1)) + int(score_match.group(2)) > 0
+
+    # Hard pre-match override: explicit pre-match wording wins even if the vision
+    # provider accidentally set is_live=True because it saw a decorative 0-0.
+    if explicit_pre:
+        return "pre_match"
+
+    # A scheduled kickoff plus no genuine running minute is strong pre-match evidence.
+    # This catches screenshots that show "Starts in ..." but the extractor only
+    # retained the date/time fields.
+    if scheduled_kickoff_visible and not explicit_live:
+        return "pre_match"
+
+    # Strong live evidence requires an actual running minute, or an explicit live
+    # classification paired with in-play score/state.  A lone is_live boolean is
+    # intentionally not enough because that was the false-positive source.
+    if minute is not None and minute > 0:
+        return "live"
+    if explicit_live and (nonzero_score or bool(live.get("is_live"))):
+        return "live"
+
+    if bool(live.get("is_live")) and score_match and not scheduled_kickoff_visible:
+        return "live"
+
+    # In a PRE-BET-only bot, a screenshot with readable teams + markets but no
+    # strong live evidence should be allowed through instead of being rejected.
+    match = extracted.get("match", {}) or {}
+    has_teams = bool(match.get("home_team") and match.get("away_team"))
+    has_markets = bool(extracted.get("markets"))
+    if has_teams and has_markets:
+        return "pre_match"
+
+    return "unknown"
+
+
+def _normalize_extracted_prebet_state(extracted):
+    state = _classify_extracted_match_state(extracted)
+    extracted = dict(extracted or {})
+    live = dict(extracted.get("live", {}) or {})
+    extracted["match_type"] = state
+    if state == "pre_match":
+        live["is_live"] = False
+        # A decorative pre-match 0-0/countdown must not leak into live logic.
+        live["minute"] = None
+        live["score"] = None
+    extracted["live"] = live
+    extracted["prebet_state_guard"] = {"classified_state": state}
+    return extracted
+
+
+async def _process_extracted_match(update, context, user, extracted):
+    # V20.5: normalize vision state before rejecting anything as live.
+    extracted = _normalize_extracted_prebet_state(extracted)
+    state = extracted.get("match_type")
+    if state == "live":
         await update.message.reply_text(
             "⚠️ SHWE OHH PRE-BET ONLY\n\n"
             "Live match screenshot မဟုတ်ဘဲ ပွဲမစခင် Pre-Bet screenshot ပို့ပေးပါ။"
@@ -1433,29 +1495,16 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 def main():
-    print("👑 SHWE OHH V18 SPEED ROUTER")
+    print("👑 SHWE OHH V20.5 PREBET STATE GUARD")
     print(f"⚡ Vision provider: {VISION_PROVIDER}; OpenAI configured: {bool(OPENAI_API_KEY)}")
     print("🟢 Starting...")
 
     print(f"🛡 Admin IDs loaded: {sorted(ADMIN_USER_IDS)}")
     print(f"📩 Public admin: {ADMIN_CONTACT}")
 
-    # Render Web Service requires an open HTTP port. Start health first so a
-    # rolling deploy can become healthy before Telegram polling handover.
+    # Render Web Service requires an open HTTP port.
     start_health_server()
-
-    # Give Render a short rolling-deploy handover window. This affects startup only,
-    # not screenshot analysis or reply speed. It also prevents the first hotfix
-    # deployment from overlapping the previous (non-locking) poller.
-    handover_grace = max(0.0, float(os.getenv("RENDER_HANDOVER_GRACE_SECONDS", "8")))
-    if handover_grace:
-        print(f"⏳ Render polling handover grace: {handover_grace:.0f}s")
-        time.sleep(handover_grace)
-
-    # Only one Render instance may call Telegram getUpdates at a time.
-    acquire_single_poller_lock()
-
-    # V16 result tracking runs only on the active Telegram instance.
+    # V16 result tracking runs independently and never blocks Telegram replies.
     start_result_tracker(interval_seconds=3600)
 
     # Telegram can be slow or intermittently blocked on some networks.
