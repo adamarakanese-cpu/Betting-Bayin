@@ -743,12 +743,11 @@ def remaining_subscription_text(expires_at):
 
 async def show_start_ready(update: Update):
     await update.message.reply_text(
-        "👑 SHWE OHH PRE-BET\n\n"
+        "👑 SHWE OHH PRE-BET — FINAL\n\n"
         "📸 1XBET Pre-Bet Screenshot ပို့ပါ။\n"
-        "🎯 Single Tip ကို အလိုအလျောက်ရွေးပေးပါမယ်။\n\n"
-        "🔥 မောင်းတွဲချင်ရင် Screenshot တွေ တစ်ပွဲချင်းပို့ပြီး ၅ပွဲပြည့်တဲ့အခါ\n"
-        "‘ခုနက 5 ပွဲကို မောင်းတွဲ’ လို့ပို့နိုင်ပါတယ်။\n"
-        "၅ပွဲထဲမှ အကောင်းဆုံးပွဲများကိုရွေးချယ်ပြီးပြန်ပို့ပေးပါမယ်။",
+        "🎯 အကောင်းဆုံး Single Tip တစ်ခုကို အလိုအလျောက်ရွေးပေးပါမယ်။\n"
+        "💰 Final target: 1.80+ value odds\n"
+        "🛡 Bookie Trap + Price Reality Guard: ACTIVE",
         reply_markup=main_menu_keyboard(),
     )
 
@@ -786,7 +785,7 @@ async def show_subscription_purchase(update: Update, user):
     await update.message.reply_text(
         "💳 SHWE OHH SUBSCRIPTION\n\n"
         "📦 WEEKLY PLAN\n"
-        "7 Days — 50,000 MMK\n\n"
+        "7 Days — 20,000 MMK\n\n"
         "🆔 YOUR USER ID\n"
         f"{user.id}\n\n"
         "ငွေပေးချေမှုနဲ့ Activate လုပ်ရန် Admin ကို ဒီ User ID ပို့ပါ။\n"
@@ -806,13 +805,13 @@ async def show_admin_contact(update: Update):
 
 async def show_help(update: Update):
     await update.message.reply_text(
-        "📖 SHWE OHH အသုံးပြုနည်း\n\n"
+        "📖 SHWE OHH PRE-BET FINAL အသုံးပြုနည်း\n\n"
         "1️⃣ ▶️ Start ကိုနှိပ်ပါ။\n"
-        "2️⃣ 1XBET Pre-Bet Match Screenshot တစ်ပုံပို့ပါ။\n"
-        "3️⃣ Bot က အကောင်းဆုံး Single Tip ကို ပြန်ပေးပါမယ်။\n"
-        "4️⃣ မောင်းတွဲချင်ရင် Screenshot တွေ တစ်ပွဲချင်းပို့ပြီး ၅ပွဲပြည့်အောင်ပို့ပါ။\n"
-        "5️⃣ ပြီးရင် ‘ခုနက 5 ပွဲကို မောင်းတွဲ’ လို့ပို့ပါ။\n\n"
-        "⚠️ Live match screenshot မဟုတ်ဘဲ Pre-Bet screenshot ပို့ပါ။",
+        "2️⃣ 1XBET Pre-Bet Match Screenshot ပို့ပါ။\n"
+        "3️⃣ Bot က screenshot market + model-derived market universe ကိုယှဉ်ပြီး Single Tip တစ်ခုရွေးပေးပါမယ်။\n"
+        "4️⃣ 1.80+ price discipline နဲ့ Bookie Trap / Price Reality Guard ကိုအသုံးပြုပါတယ်။\n\n"
+        "⚠️ Live match screenshot မဟုတ်ဘဲ Pre-Bet screenshot ပို့ပါ။\n"
+        "⚠️ FINAL release က Single Bet Only ဖြစ်ပါတယ်။",
         reply_markup=main_menu_keyboard(),
     )
 
@@ -879,7 +878,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"မင်္ဂလာပါ {safe_first_name}!\n\n"
         "🔒 Subscription မရှိသေးပါ။\n\n"
         "💳 WEEKLY PLAN\n"
-        "7 Days — 50,000 MMK\n\n"
+        "7 Days — 20,000 MMK\n\n"
         "🆔 YOUR USER ID\n"
         f"{user.id}\n\n"
         "Subscription ဝယ်ယူလိုပါ <b>Subscription ဝယ်ယူရန်</b> ခလုတ်ကိုနှိပ်ပေးပါ။",
@@ -1374,7 +1373,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Shwe Ohh Subscription မရှိပါ သို့မဟုတ် သက်တမ်းကုန်နေပါပြီ.\n\n"
                 "🆔 YOUR USER ID\n"
                 f"{user.id}\n\n"
-                "💳 7 Days — 50,000 MMK\n\n"
+                "💳 7 Days — 20,000 MMK\n\n"
                 f"📩 Admin: {ADMIN_CONTACT}"
             )
             return
@@ -1468,18 +1467,14 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_help(update)
         return
 
-    # Natural-language parlay workflow remains unchanged.
+    # FINAL release is Single Bet Only. Keep legacy parlay code disabled.
     parlay_words = ("မောင်း", "တွဲ", "parlay", "accumulator", "acca", "combo")
     if any(word in low for word in parlay_words):
-        if not is_admin(user.id):
-            active, status, expires_at = check_license(user.id)
-            if not active:
-                await update.message.reply_text(
-                    "🔒 Subscription မရှိပါ သို့မဟုတ် သက်တမ်းကုန်နေပါပြီ။",
-                    reply_markup=main_menu_keyboard(),
-                )
-                return
-        await update.message.reply_text(await _build_parlay_reply(user.id, text), reply_markup=main_menu_keyboard())
+        await update.message.reply_text(
+            "🎯 SHWE OHH PRE-BET FINAL က Single Bet Only ဖြစ်ပါတယ်။\n"
+            "📸 Pre-Bet Screenshot တစ်ပွဲပို့ပြီး Single Tip ယူပါ။",
+            reply_markup=main_menu_keyboard(),
+        )
         return
 
     await update.message.reply_text(
@@ -1539,7 +1534,6 @@ def main():
     application.add_handler(CommandHandler("extend", extend_command))
     application.add_handler(CommandHandler("block", block_command))
     application.add_handler(CommandHandler("status", status_command))
-    application.add_handler(CommandHandler("parlay", parlay_command))
     application.add_handler(CommandHandler("performance", performance_command))
     application.add_handler(CommandHandler("pending", pending_command))
     application.add_handler(CommandHandler("checkresults", checkresults_command))
