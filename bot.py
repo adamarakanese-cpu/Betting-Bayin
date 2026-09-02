@@ -55,6 +55,7 @@ from testing_tracker import init_testing_tracker, record_prebet_tip
 from tracker_web import handle_tracker_get, handle_tracker_post
 from screenshot_merge import merge_extractions
 from match_reconcile import reconcile_album_extractions
+from prebet_local_ocr import extract_prebet_local, local_prebet_good_enough
 
 
 # =========================================================
@@ -75,6 +76,13 @@ ADMIN_USER_IDS_RAW = os.getenv("ADMIN_USER_IDS", "").strip()
 ADMIN_USERNAME_RAW = os.getenv("ADMIN_USERNAME", "shweohh_admin").strip()
 VISION_MODEL = os.getenv("VISION_MODEL", "qwen/qwen3.6-27b")
 PORT = int(os.getenv("PORT", "10000"))
+
+LOCAL_OCR_ENABLED = os.getenv("LOCAL_OCR_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
+LOCAL_OCR_MIN_CONFIDENCE = max(0.50, min(0.95, float(os.getenv("LOCAL_OCR_MIN_CONFIDENCE", "0.72") or 0.72)))
+VISION_MAX_LONG_EDGE = max(900, int(os.getenv("VISION_MAX_LONG_EDGE", "1400") or 1400))
+VISION_JPEG_QUALITY = max(60, min(92, int(os.getenv("VISION_JPEG_QUALITY", "80") or 80)))
+OPENAI_429_COOLDOWN = max(60, int(os.getenv("OPENAI_429_COOLDOWN", "900") or 900))
+GROQ_429_COOLDOWN = max(60, int(os.getenv("GROQ_429_COOLDOWN", "900") or 900))
 
 if not GROQ_API_KEY:
     raise RuntimeError("GROQ_API_KEY မတွေ့ပါ")
@@ -178,7 +186,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             payload = {
                 "ok": True,
                 "service": "Shwe Ohh",
-                "version": "V20.6 CONTEXT ACCURACY",
+                "version": "V20.6 TEST TRACKER + PREBET OCR R1",
                 "telegram_polling": True,
             }
             body = json.dumps(payload).encode("utf-8")
@@ -206,7 +214,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             body = json.dumps({
                 "ok": True,
                 "service": "Shwe Ohh",
-                "version": "V20.6 CONTEXT ACCURACY",
+                "version": "V20.6 TEST TRACKER + PREBET OCR R1",
                 "telegram_polling": True,
             }).encode("utf-8")
             self.send_response(200)
@@ -248,9 +256,25 @@ def is_admin(user_id):
         return False
 
 
+def _optimized_image_bytes(image_path):
+    from io import BytesIO
+    from PIL import Image, ImageOps
+    with Image.open(image_path) as img:
+        img = ImageOps.exif_transpose(img).convert("RGB")
+        longest = max(img.size)
+        if longest > VISION_MAX_LONG_EDGE:
+            scale = VISION_MAX_LONG_EDGE / float(longest)
+            img = img.resize(
+                (max(1, int(img.width * scale)), max(1, int(img.height * scale))),
+                Image.Resampling.LANCZOS,
+            )
+        out = BytesIO()
+        img.save(out, format="JPEG", quality=VISION_JPEG_QUALITY, optimize=True, progressive=True)
+        return out.getvalue()
+
+
 def image_to_data_url(image_path):
-    with open(image_path, "rb") as image_file:
-        encoded = base64.b64encode(image_file.read()).decode("utf-8")
+    encoded = base64.b64encode(_optimized_image_bytes(image_path)).decode("utf-8")
     return f"data:image/jpeg;base64,{encoded}"
 
 
@@ -339,33 +363,74 @@ def _vision_request(image_path, json_mode=True):
     return _clean_vision_json(response.choices[0].message.content)
 
 
-def analyze_screenshot(image_path):
-    """Robust single-page extraction with safe retries.
+class VisionRateLimitError(RuntimeError):
+    def __init__(self, message, retry_seconds=60):
+        super().__init__(message)
+        self.retry_seconds = max(1, int(retry_seconds or 60))
 
-    Attempt 1 uses the original Telegram image in JSON mode. If the vision API
-    rejects that image with a BadRequest or returns malformed JSON, retry a
-    normalized JPEG. A final retry removes response_format while keeping the
-    prompt JSON-only.
-    """
+
+_PROVIDER_BLOCKED_UNTIL = {"openai": 0.0, "groq": 0.0}
+
+
+def _is_rate_limit(error):
+    s = str(error or "").lower()
+    return "429" in s or "rate_limit" in s or "too many requests" in s
+
+
+def _retry_seconds(error, default=60):
+    try:
+        response = getattr(error, "response", None)
+        if response is not None:
+            value = response.headers.get("retry-after")
+            if value:
+                return max(1, int(float(value)))
+    except Exception:
+        pass
+    s = str(error or "")
+    match = re.search(r"(?:please\s+)?try\s+again\s+in\s+(?:(\d+)m)?\s*([\d.]+)s", s, re.I)
+    if match:
+        return max(1, int(float(match.group(1) or 0) * 60 + float(match.group(2) or 0) + 1))
+    return int(default)
+
+
+def _block_provider(name, error):
+    default = OPENAI_429_COOLDOWN if name == "openai" else GROQ_429_COOLDOWN
+    sec = _retry_seconds(error, default)
+    _PROVIDER_BLOCKED_UNTIL[name] = max(_PROVIDER_BLOCKED_UNTIL.get(name, 0.0), time.time() + sec)
+    print(f"⏳ {name.upper()} VISION COOLDOWN {sec}s", flush=True)
+    return sec
+
+
+def _provider_wait(name):
+    return max(0, int(_PROVIDER_BLOCKED_UNTIL.get(name, 0.0) - time.time()))
+
+
+def analyze_screenshot(image_path):
+    """Single-page Groq fallback without blind retries on HTTP 429."""
     errors = []
     safe_path = None
+    wait = _provider_wait("groq")
+    if wait > 0:
+        raise VisionRateLimitError("Groq vision cooldown", wait)
     try:
-        for path, json_mode in [(image_path, True)]:
-            try:
-                return _vision_request(path, json_mode=json_mode)
-            except Exception as error:
-                errors.append(repr(error))
+        try:
+            return _vision_request(image_path, json_mode=True)
+        except Exception as error:
+            errors.append(repr(error))
+            if _is_rate_limit(error):
+                sec = _block_provider("groq", error)
+                raise VisionRateLimitError("Groq vision rate limited", sec) from error
 
         safe_path = _make_safe_vision_copy(image_path)
         retry_path = safe_path or image_path
-
-        for json_mode in (True, False):
-            try:
-                return _vision_request(retry_path, json_mode=json_mode)
-            except Exception as error:
-                errors.append(repr(error))
-
-        raise RuntimeError("Vision extraction failed after retries: " + " | ".join(errors[-3:]))
+        try:
+            return _vision_request(retry_path, json_mode=False)
+        except Exception as error:
+            errors.append(repr(error))
+            if _is_rate_limit(error):
+                sec = _block_provider("groq", error)
+                raise VisionRateLimitError("Groq vision rate limited", sec) from error
+        raise RuntimeError("Vision extraction failed: " + " | ".join(errors[-2:]))
     finally:
         if safe_path and os.path.exists(safe_path):
             try:
@@ -440,7 +505,7 @@ def _openai_extract_images(image_paths):
     return _clean_vision_json(data["choices"][0]["message"]["content"])
 
 def analyze_images_fast(image_paths):
-    """V18: one OpenAI request for a whole album; Groq parallel fallback."""
+    """PreBet reliability router: local OCR first, then rate-limit-aware remote vision."""
     paths = list(image_paths or [])
     if not paths:
         raise ValueError("No image paths")
@@ -450,45 +515,91 @@ def analyze_images_fast(image_paths):
         cached["vision_provider"] = "cache"
         return cached
 
-    errors = []
-    use_openai = OPENAI_API_KEY and VISION_PROVIDER in {"auto", "openai"}
-    if use_openai:
+    # FREE FIRST: standard 1xBet pre-match screenshots are read locally.
+    if LOCAL_OCR_ENABLED:
         try:
             started = time.perf_counter()
-            result = _openai_extract_images(paths)
-            result["vision_provider"] = "openai"
-            result["vision_seconds"] = round(time.perf_counter() - started, 3)
-            result["screenshots_merged"] = len(paths)
-            _cache_put(cache_key, result)
-            return result
-        except Exception as e:
-            errors.append(f"openai: {type(e).__name__}: {e}")
-            print("OPENAI VISION FALLBACK:", errors[-1])
-            if VISION_PROVIDER == "openai":
-                raise
+            local = extract_prebet_local(paths)
+            local["vision_seconds"] = round(time.perf_counter() - started, 3)
+            print(
+                f"🔎 PREBET LOCAL OCR confidence={local.get('ocr_confidence')} "
+                f"markets={len(local.get('markets') or [])}",
+                flush=True,
+            )
+            if local_prebet_good_enough(local, LOCAL_OCR_MIN_CONFIDENCE):
+                local["screenshots_merged"] = len(paths)
+                local["vision_provider"] = "local_ocr"
+                _cache_put(cache_key, local)
+                print("✅ PREBET LOCAL OCR ACCEPTED", flush=True)
+                return local
+            print("↪️ PREBET LOCAL OCR -> REMOTE FALLBACK", flush=True)
+        except Exception as error:
+            print("PREBET LOCAL OCR FAILED:", repr(error), flush=True)
 
-    # Existing Groq path remains a production fallback.
-    started = time.perf_counter()
-    from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=min(6, len(paths))) as pool:
-        futures = [pool.submit(analyze_screenshot, p) for p in paths]
-        extracted = []
-        for idx, f in enumerate(futures, 1):
+    errors = []
+    waits = []
+
+    use_openai = OPENAI_API_KEY and VISION_PROVIDER in {"auto", "openai"}
+    if use_openai:
+        wait = _provider_wait("openai")
+        if wait > 0:
+            waits.append(wait)
+            errors.append(f"openai cooldown {wait}s")
+        else:
             try:
-                extracted.append(f.result())
-            except Exception as e:
-                errors.append(f"groq page {idx}: {type(e).__name__}: {e}")
-    if not extracted:
-        raise RuntimeError("Vision failed: " + " | ".join(errors[-5:]))
-    reconciled, identity_meta = reconcile_album_extractions(extracted)
-    result = merge_extractions(reconciled)
-    result["album_identity"] = identity_meta
-    result["vision_provider"] = "groq"
-    result["vision_seconds"] = round(time.perf_counter() - started, 3)
-    result["vision_page_errors"] = errors
-    result["screenshots_merged"] = len(paths)
-    _cache_put(cache_key, result)
-    return result
+                started = time.perf_counter()
+                result = _openai_extract_images(paths)
+                result["vision_provider"] = "openai"
+                result["vision_seconds"] = round(time.perf_counter() - started, 3)
+                result["screenshots_merged"] = len(paths)
+                _cache_put(cache_key, result)
+                return result
+            except Exception as error:
+                errors.append(f"openai: {type(error).__name__}: {error}")
+                print("OPENAI VISION FALLBACK:", errors[-1], flush=True)
+                if _is_rate_limit(error):
+                    waits.append(_block_provider("openai", error))
+                elif VISION_PROVIDER == "openai":
+                    raise
+
+    if VISION_PROVIDER in {"auto", "groq"}:
+        wait = _provider_wait("groq")
+        if wait > 0:
+            waits.append(wait)
+            errors.append(f"groq cooldown {wait}s")
+        else:
+            started = time.perf_counter()
+            from concurrent.futures import ThreadPoolExecutor
+            extracted = []
+            rate_limited = False
+            with ThreadPoolExecutor(max_workers=min(3, len(paths))) as pool:
+                futures = [pool.submit(analyze_screenshot, p) for p in paths]
+                for idx, future in enumerate(futures, 1):
+                    try:
+                        extracted.append(future.result())
+                    except VisionRateLimitError as error:
+                        rate_limited = True
+                        waits.append(error.retry_seconds)
+                        errors.append(f"groq page {idx}: rate limited")
+                    except Exception as error:
+                        errors.append(f"groq page {idx}: {type(error).__name__}: {error}")
+            if extracted:
+                reconciled, identity_meta = reconcile_album_extractions(extracted)
+                result = merge_extractions(reconciled)
+                result["album_identity"] = identity_meta
+                result["vision_provider"] = "groq"
+                result["vision_seconds"] = round(time.perf_counter() - started, 3)
+                result["vision_page_errors"] = errors
+                result["screenshots_merged"] = len(paths)
+                _cache_put(cache_key, result)
+                return result
+            if rate_limited:
+                pass
+
+    if waits:
+        raise VisionRateLimitError("Remote vision providers are rate limited", max(1, min(waits)))
+    raise RuntimeError("Vision failed: " + " | ".join(errors[-5:]))
+
 
 
 # =========================================================
@@ -1344,12 +1455,21 @@ async def _process_photo_file_ids(update, context, file_ids):
         )
         await _process_extracted_match(update, context, user, merged)
 
+    except VisionRateLimitError as error:
+        print("PREBET VISION RATE LIMIT:", repr(error), flush=True)
+        mins = max(1, (int(error.retry_seconds) + 59) // 60)
+        await update.message.reply_text(
+            "⚠️ Screenshot ကို Local OCR နဲ့ မသေချာလောက်အောင်ဖတ်မရသေးပါ။\n\n"
+            f"Free Vision fallback ကလည်း limit ထိနေပါတယ် ({mins} min cooldown).\n"
+            "Market နဲ့ odds ကို crop လုပ်ပြီး ပိုရှင်းတဲ့ screenshot ပြန်ပို့ရင် Local OCR နဲ့ API မသုံးဘဲဖတ်နိုင်ပါတယ်။\n\n"
+            "ဒီ failed request ကို Test Tracker ထဲ မထည့်ထားပါ။"
+        )
     except Exception as error:
-        print("FULL PIPELINE ERROR:", repr(error))
+        print("FULL PIPELINE ERROR:", repr(error), flush=True)
         await update.message.reply_text(
             "❌ Analysis error ဖြစ်ပါတယ်.\n\n"
             f"Error: {type(error).__name__}\n"
-            "Screenshot ကို ပြန်ပို့ကြည့်ပါ။"
+            "Screenshot ကို market/odds ရှင်းအောင် ပြန်ပို့ကြည့်ပါ။"
         )
     finally:
         for temp_path in temp_paths:

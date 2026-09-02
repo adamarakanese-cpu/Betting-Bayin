@@ -1,0 +1,3 @@
+opencv-python-headless==4.12.0.88
+pytesseract==0.3.13
+Pillow==12.0.0
