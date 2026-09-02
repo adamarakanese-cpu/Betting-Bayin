@@ -61,16 +61,36 @@ def apply_contextual_learning(candidates, extracted, research):
     if mem["leagues"].get(league): stats.append(mem["leagues"][league])
     if mem["teams"].get(home): stats.append(mem["teams"][home])
     if mem["teams"].get(away): stats.append(mem["teams"][away])
-    if not stats:
+    web = extracted.get("web_context") or {}
+    web_conf = _clamp(web.get("data_confidence", 0.0), 0.0, 1.0) if web else 0.0
+    if not stats and web_conf <= 0.15:
         return list(candidates or [])
-    adjustment = _clamp(sum(s["adjustment"] for s in stats) / len(stats), -0.025, 0.025)
+    hist_adjustment = _clamp(sum(s["adjustment"] for s in stats) / len(stats), -0.025, 0.025) if stats else 0.0
+    adjustment = hist_adjustment
+    if web_conf > 0.15:
+        hs=float(web.get("home_strength",.5)); aas=float(web.get("away_strength",.5))
+        hf=float(web.get("home_recent_form",.5)); af=float(web.get("away_recent_form",.5))
+        contextual_edge=((hs+hf)-(aas+af))/4.0
+        adjustment += _clamp(contextual_edge * 0.05 * web_conf, -0.03, 0.03)
+    adjustment = _clamp(adjustment, -0.04, 0.04)
     sample = sum(s["sample"] for s in stats)
     out = []
     for original in candidates or []:
         c = dict(original)
         old = float(c.get("model_probability") or 0.5)
-        new = _clamp(old + adjustment, 0.01, 0.99)
-        c["context_learning_adjustment"] = adjustment
+        joined=(str(c.get("market") or "")+" "+str(c.get("selection") or "")).lower()
+        local_adj=adjustment
+        if web_conf > 0.15:
+            away_side = bool(re.search(r"\b(team\s*2|away|w2|2x)\b", joined)) and not bool(re.search(r"\b1x2\b", joined))
+            home_side = bool(re.search(r"\b(team\s*1|home|w1|1x)\b", joined))
+            if away_side and not home_side:
+                local_adj=-adjustment
+            if "total" in joined or "score" in joined or "btts" in joined:
+                goal=((float(web.get("home_scoring_rate",.5))+float(web.get("away_scoring_rate",.5))+float(web.get("league_goal_rate",.5)))/3)-.5
+                sign=-1 if "under" in joined or " no" in joined else 1
+                local_adj=_clamp(sign*goal*0.05*web_conf,-.035,.035)
+        new = _clamp(old + local_adj, 0.01, 0.99)
+        c["context_learning_adjustment"] = local_adj
         c["context_learning_sample"] = sample
         c["model_probability"] = new
         if c.get("market_probability") is not None:
@@ -144,13 +164,13 @@ def _candidate_thesis(candidate):
 def _price_quality_adjustment(odds):
     """V20 SAFE BIG ODD price shaping.
 
-    Final selection has a hard 1.80 floor. Price itself is never allowed to dominate
-    football probability: the preferred zone is 1.80-2.80, while very large prices
+    Final selection has a hard 1.50 floor. Price itself is never allowed to dominate
+    football probability: the preferred zone is 1.50-2.80, while very large prices
     are progressively penalized because they normally imply lower hit probability.
     """
     if not odds or odds <= 1.0:
         return -1.000
-    if odds < 1.80:
+    if odds < 1.50:
         return -0.850
     if odds <= 2.05:
         return 0.090
@@ -196,7 +216,7 @@ def _bookie_trap_metrics(candidate):
     # trap. Score price-threshold safety from probability/evidence/risk instead.
     if candidate.get("odds_estimated"):
         if odds <= 1.0:
-            odds = float(candidate.get("minimum_acceptable_odds") or 1.80)
+            odds = float(candidate.get("minimum_acceptable_odds") or 1.50)
         break_even = _clamp((1.0 - push) / odds, 0.005, 0.995)
         threshold_ev = independent_p * odds + push - 1.0
         fair_odds = max(1.01, (1.0 - push) / max(independent_p, 0.005))
@@ -304,8 +324,8 @@ def apply_selection_intelligence(candidates, extracted=None, research=None, audi
     """V20.3 open-market selector with independent-model price protection.
 
     Screenshot quotes and outside/model-derived markets compete on one safety scale.
-    A real quote must clear 1.80; an outside market carries a calculated minimum
-    take threshold and may win even when real 1.80+ screenshot quotes exist.
+    A real quote must clear 1.50; an outside market carries a calculated minimum
+    take threshold and may win even when real 1.50+ screenshot quotes exist.
     """
     audit = audit or {}
     out = []
@@ -327,7 +347,7 @@ def apply_selection_intelligence(candidates, extracted=None, research=None, audi
         trap_risk = float(c.get("bookie_trap_risk") or 0.0)
 
         # Accuracy remains first. The price floor is a constraint, not a reason to
-        # chase the highest odd. This deliberately favors the safest 1.80+ option.
+        # chase the highest odd. This deliberately favors the safest 1.50+ option.
         score = p * 0.620 + evidence * 0.150
         score += max(-0.045, min(0.050, ev * 0.20))
         score += max(-0.018, min(0.018, edge * 0.09))
@@ -390,14 +410,14 @@ def apply_selection_intelligence(candidates, extracted=None, research=None, audi
 
         # Hard product floor. For outside markets `odds` is a model TAKE threshold,
         # not a fabricated quote. For real screenshot markets it is the actual quote.
-        if odds < 1.80:
+        if odds < 1.50:
             c["single_bet_ineligible"] = True
-            c["single_bet_ineligible_reason"] = "ODDS_BELOW_1_80"
+            c["single_bet_ineligible_reason"] = "ODDS_BELOW_1_50"
             score -= 1.0
         else:
             c["single_bet_ineligible"] = False
             c["single_bet_ineligible_reason"] = None
-        c["safe_big_odd_eligible"] = bool(odds >= 1.80)
+        c["safe_big_odd_eligible"] = bool(odds >= 1.50)
 
         c["market_thesis"] = _candidate_thesis(c)
         c["price_quality_adjustment"] = 0.0 if c.get("odds_estimated") else _price_quality_adjustment(odds)
@@ -425,9 +445,9 @@ def apply_selection_intelligence(candidates, extracted=None, research=None, audi
     leader_ev = float(leader.get("expected_value") or 0.0)
     thesis = leader.get("market_thesis")
 
-    if leader_odds and leader_odds < 1.80 and not leader.get("odds_estimated"):
+    if leader_odds and leader_odds < 1.50 and not leader.get("odds_estimated"):
         # The safest raw thesis may be a short-priced market. Upgrade to a nearby
-        # expression of the same idea that clears 1.80 without sacrificing too much
+        # expression of the same idea that clears 1.50 without sacrificing too much
         # model probability.
         min_related_p = max(0.46, leader_p - 0.20)
         for c in out:
@@ -436,7 +456,7 @@ def apply_selection_intelligence(candidates, extracted=None, research=None, audi
             odds = float(c.get("odds") or 0.0)
             p = float(c.get("model_probability") or 0.0)
             evidence = float(c.get("evidence_confidence") or 0.0)
-            if not (1.80 <= odds <= 3.20 and p >= min_related_p):
+            if not (1.50 <= odds <= 3.20 and p >= min_related_p):
                 continue
             if evidence + 0.20 < float(leader.get("evidence_confidence") or 0.0):
                 continue

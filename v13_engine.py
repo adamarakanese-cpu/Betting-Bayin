@@ -887,14 +887,14 @@ def _minimum_acceptable_odds(probability, evidence, extracted, push_probability=
 
     This is NOT a bookmaker quote. It is the lowest price at which the independent
     model has a small safety edge after uncertainty. The hard product rule remains
-    1.80+, but weak/lower-probability markets can require a higher take price.
+    1.50+, but weak/lower-probability markets can require a higher take price.
     """
     p = _clamp(probability, 0.01, 0.99)
     push = _clamp(push_probability, 0.0, 0.90)
     fair = max(1.01, (1.0 - push) / p)
     comp = _competition_penalty(extracted)
     buffer = 0.018 + (1.0 - _clamp(evidence)) * 0.022 + comp * 0.10
-    threshold = max(1.80, fair * (1.0 + buffer))
+    threshold = max(1.50, fair * (1.0 + buffer))
     # Never pretend a sub-cent price. Round UP so the displayed threshold cannot
     # accidentally be easier than the internal value requirement.
     return math.ceil(threshold * 100.0 - 1e-9) / 100.0
@@ -1043,7 +1043,7 @@ def _hidden_model_candidates(extracted, probability, calibration, reliability, d
         # The minimum Take Odds is a VALUE THRESHOLD, not an observed price.
         # V20.3 accidentally ranked that threshold almost like a real quote. That
         # structurally favoured very-safe outside lines (especially Team Total
-        # Under 2.5) because many of them were assigned the same 1.80 threshold.
+        # Under 2.5) because many of them were assigned the same 1.50 threshold.
         # We now rank an outside market by how plausible it is that a bookmaker
         # could actually offer the required price.
         center_ratio = est_center / max(min_take, 1.01)
@@ -1059,7 +1059,7 @@ def _hidden_model_candidates(extracted, probability, calibration, reliability, d
             availability = "CHECK_PRICE"
 
         # Probability/evidence still lead, but there is NO bonus simply because
-        # min_take happened to floor at 1.80. Unverified outside prices must earn
+        # min_take happened to floor at 1.50. Unverified outside prices must earn
         # their place through realistic price overlap.
         score = p * 0.60 + evidence * 0.18 - risk * 0.19
         score += price_reality_score * 0.055
@@ -1181,14 +1181,14 @@ def build_v13_decision(extracted, research, probability, calibration):
 
     # V20.3 FINAL SELECTOR — OPEN MARKET UNIVERSE.
     # Screenshot markets and outside/model-derived markets compete together.
-    # Real 1xBet quotes must be >=1.80. Outside markets carry a model-computed
-    # minimum take price (also >=1.80) and may beat visible markets when safer.
+    # Real 1xBet quotes must be >=1.50. Outside markets carry a model-computed
+    # minimum take price (also >=1.50) and may beat visible markets when safer.
     eligible = []
     for c in ranked:
         if c.get("single_bet_ineligible"):
             continue
         price = float(c.get("odds") or 0.0)
-        if price < 1.80:
+        if price < 1.50:
             continue
         eligible.append(c)
 
@@ -1197,7 +1197,7 @@ def build_v13_decision(extracted, research, probability, calibration):
             "version": V13_VERSION, "status": "NEED_INPUT", "tip": None,
             "ranked_candidates": ranked[:10], "deepseek_audit": audit,
             "reliability": reliability,
-            "gate_reasons": ["1.80+ Single Tip တည်ဆောက်ဖို့ match/market data မလုံလောက်ပါ။"],
+            "gate_reasons": ["1.50+ Single Tip တည်ဆောက်ဖို့ match/market data မလုံလောက်ပါ။"],
             "warnings": ["Input/extraction incomplete — this is not a NO BET decision"],
         }
 
@@ -1214,19 +1214,19 @@ def build_v13_decision(extracted, research, probability, calibration):
         if p_ind < 0.48 or trap > 0.58 or price > 3.80:
             continue
         # Outside markets must also have a plausible path to the requested price;
-        # otherwise a 95%-probability market could unrealistically say "take 1.80".
+        # otherwise a 95%-probability market could unrealistically say "take 1.50".
         if c.get("odds_estimated") and not c.get("price_actionable"):
             continue
         quality_pool.append(c)
     if quality_pool:
         pool = quality_pool
     else:
-        # If no high-quality candidate survives, prefer a REAL 1xBet 1.80+ quote
+        # If no high-quality candidate survives, prefer a REAL 1xBet 1.50+ quote
         # over an outside market whose price is still unverified. This preserves
         # the mandatory-tip rule without pretending a Take Odds threshold exists.
         real_fallback = [
             c for c in base_pool
-            if not c.get("odds_estimated") and float(c.get("odds") or 0.0) >= 1.80
+            if not c.get("odds_estimated") and float(c.get("odds") or 0.0) >= 1.50
         ]
         pool = real_fallback or base_pool
 
@@ -1247,8 +1247,8 @@ def build_v13_decision(extracted, research, probability, calibration):
         score -= risk * 0.075
 
         # Higher required prices normally imply harder events. We want Big Odd,
-        # not reckless longshots, so the sweet spot remains ~1.80-2.80.
-        if 1.80 <= price <= 2.10:
+        # not reckless longshots, so the sweet spot remains ~1.50-2.80.
+        if 1.50 <= price <= 2.10:
             score += 0.060
         elif price <= 2.50:
             score += 0.042
@@ -1366,8 +1366,8 @@ def format_v13_tip(result):
             odds_line = f"💰 Odds: {odds:.3f}\n"
     else:
         # Never fabricate a bookmaker quote. The exact threshold is computed from
-        # model fair price + uncertainty, and can be above the product's 1.80 floor.
-        take = float(tip.get("minimum_acceptable_odds") or tip.get("odds") or 1.80)
+        # model fair price + uncertainty, and can be above the product's 1.50 floor.
+        take = float(tip.get("minimum_acceptable_odds") or tip.get("odds") or 1.50)
         odds_line = f"💰 Take Odds: {take:.2f}+ only (check 1xBet)\n"
 
     return (
