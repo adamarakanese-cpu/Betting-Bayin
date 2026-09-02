@@ -51,12 +51,14 @@ from pipeline_engine import (
 from v13_engine import format_v13_tip
 from parlay_engine import build_best_parlay, format_parlay
 from result_tracker import check_pending_results, start_result_tracker
+from testing_tracker import init_testing_tracker, record_prebet_tip
+from tracker_web import handle_tracker_get, handle_tracker_post
 from screenshot_merge import merge_extractions
 from match_reconcile import reconcile_album_extractions
 
 
 # =========================================================
-# SHWE OHH V20.5 PREBET STATE GUARD
+# SHWE OHH V20.6 CONTEXT ACCURACY
 # TELEGRAM BOT + FULL AI PIPELINE + RENDER HEALTH SERVER
 # =========================================================
 
@@ -70,83 +72,6 @@ OPENAI_VISION_TIMEOUT = float(os.getenv("OPENAI_VISION_TIMEOUT", "35"))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_USER_ID_RAW = os.getenv("ADMIN_USER_ID", "").strip()
 ADMIN_USER_IDS_RAW = os.getenv("ADMIN_USER_IDS", "").strip()
-OPENAI_KEY = OPENAI_API_KEY
-
-# === CONTEXT ACCURACY LAYER ===
-_CONTEXT_CACHE = {}
-CONTEXT_RESEARCH_ENABLED = os.getenv("CONTEXT_RESEARCH_ENABLED", "1").strip().lower() not in {"0","false","off","no"}
-CONTEXT_MODEL = os.getenv("CONTEXT_MODEL", "gpt-4.1-mini").strip()
-
-def _responses_output_text(data):
-    parts=[]
-    if isinstance(data,dict):
-        if isinstance(data.get("output_text"),str): parts.append(data["output_text"])
-        for item in data.get("output") or []:
-            if not isinstance(item,dict): continue
-            for c in item.get("content") or []:
-                if isinstance(c,dict) and isinstance(c.get("text"),str): parts.append(c["text"])
-    return "\n".join(parts).strip()
-
-def _context_json(text):
-    text=str(text or "").strip().replace("```json","").replace("```","").strip()
-    try:return json.loads(text)
-    except Exception:
-        m=re.search(r"\{.*\}",text,re.S)
-        if m:
-            try:return json.loads(m.group(0))
-            except Exception:pass
-    return {}
-
-def _fetch_match_context(extracted, live_mode=False):
-    if not CONTEXT_RESEARCH_ENABLED or not OPENAI_KEY:return {}
-    match=extracted.get("match") or {}
-    home=str(match.get("home_team") or "").strip()
-    away=str(match.get("away_team") or "").strip()
-    comp=str(extracted.get("competition") or "").strip()
-    if not home or not away:return {}
-    key=(home.lower(),away.lower(),comp.lower(),bool(live_mode))
-    ttl=1800 if live_mode else 21600
-    now=time.time()
-    hit=_CONTEXT_CACHE.get(key)
-    if hit and now-hit[0] < ttl:return hit[1]
-    lv=extracted.get("live") or {}
-    state=(" Current live state: minute=%s, score=%s."%(lv.get("minute"),lv.get("score"))) if live_mode else ""
-    prompt=(
-        "Research this football match using current reliable public web sources.\n"
-        f"Match: {home} vs {away}\nCompetition: {comp or 'unknown'}\n{state}\n"
-        'Return JSON ONLY: {"home_strength":0.5,"away_strength":0.5,"home_recent_form":0.5,'
-        '"away_recent_form":0.5,"home_scoring_rate":0.5,"away_scoring_rate":0.5,'
-        '"home_conceding_rate":0.5,"away_conceding_rate":0.5,"league_goal_rate":0.5,'
-        '"league_volatility":0.5,"data_confidence":0.0,"notes":[]}\n'
-        "Use recent competitive matches, league level/style, and reliably reported absences when available. "
-        "Do not invent missing facts. For friendlies/youth/reserve/lower leagues use higher volatility and lower confidence. "
-        "This is factual context only, not betting advice."
-    )
-    payload={"model":CONTEXT_MODEL,"tools":[{"type":"web_search_preview"}],"input":prompt}
-    try:
-        with httpx.Client(timeout=30.0) as h:
-            r=h.post("https://api.openai.com/v1/responses",
-                     headers={"Authorization":f"Bearer {OPENAI_KEY}","Content-Type":"application/json"},
-                     json=payload)
-            r.raise_for_status()
-            data=_context_json(_responses_output_text(r.json()))
-        if not isinstance(data,dict):data={}
-        def bounded(k,default=.5):
-            try:return max(0.0,min(1.0,float(data.get(k,default))))
-            except:return default
-        keys=("home_strength","away_strength","home_recent_form","away_recent_form",
-              "home_scoring_rate","away_scoring_rate","home_conceding_rate","away_conceding_rate",
-              "league_goal_rate","league_volatility","data_confidence")
-        ctx={k:bounded(k) for k in keys}
-        ctx["notes"]=(data.get("notes") or [])[:6]
-        _CONTEXT_CACHE[key]=(now,ctx)
-        print("CONTEXT RESEARCH",json.dumps({"match":f"{home} vs {away}","competition":comp,"context":ctx},ensure_ascii=False),flush=True)
-        return ctx
-    except Exception as e:
-        print("CONTEXT RESEARCH FALLBACK",repr(e),flush=True)
-        return {}
-
-
 ADMIN_USERNAME_RAW = os.getenv("ADMIN_USERNAME", "shweohh_admin").strip()
 VISION_MODEL = os.getenv("VISION_MODEL", "qwen/qwen3.6-27b")
 PORT = int(os.getenv("PORT", "10000"))
@@ -175,6 +100,7 @@ ADMIN_CONTACT = f"@{ADMIN_USERNAME}" if ADMIN_USERNAME else "Admin"
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 init_database()
+init_testing_tracker()
 
 
 VISION_SYSTEM_PROMPT = """
@@ -246,11 +172,13 @@ Return exactly:
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
+        if handle_tracker_get(self):
+            return
         if self.path in ("/", "/health"):
             payload = {
                 "ok": True,
                 "service": "Shwe Ohh",
-                "version": "V20.5 PREBET STATE GUARD",
+                "version": "V20.6 CONTEXT ACCURACY",
                 "telegram_polling": True,
             }
             body = json.dumps(payload).encode("utf-8")
@@ -266,12 +194,19 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"Not Found")
 
+    def do_POST(self):
+        if handle_tracker_post(self):
+            return
+        self.send_response(404)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_HEAD(self):
-        if self.path in ("/", "/health"):
+        if self.path in ("/", "/health", "/testing"):
             body = json.dumps({
                 "ok": True,
                 "service": "Shwe Ohh",
-                "version": "V20.5 PREBET STATE GUARD",
+                "version": "V20.6 CONTEXT ACCURACY",
                 "telegram_polling": True,
             }).encode("utf-8")
             self.send_response(200)
@@ -1338,8 +1273,6 @@ async def _process_extracted_match(update, context, user, extracted):
         )
         return
 
-    extracted["web_context"] = await asyncio.to_thread(_fetch_match_context, extracted, False)
-
     result = await asyncio.to_thread(
         run_full_pipeline,
         extracted,
@@ -1349,6 +1282,11 @@ async def _process_extracted_match(update, context, user, extracted):
 
     log_usage(user.id, "full_pipeline_analysis")
     await asyncio.to_thread(save_tip, user.id, result)
+    try:
+        testing_id = await asyncio.to_thread(record_prebet_tip, user.id, result, extracted)
+        print(f"🧪 PREBET TEST TRACKER: #{testing_id}", flush=True)
+    except Exception as tracker_error:
+        print("⚠️ PREBET TEST TRACKER ERROR", repr(tracker_error), flush=True)
 
     reply = format_v13_tip(result)
     chunk_size = 3800
@@ -1569,7 +1507,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 def main():
-    print("👑 SHWE OHH V20.5 PREBET STATE GUARD")
+    print("👑 SHWE OHH V20.6 CONTEXT ACCURACY")
     print(f"⚡ Vision provider: {VISION_PROVIDER}; OpenAI configured: {bool(OPENAI_API_KEY)}")
     print("🟢 Starting...")
 
